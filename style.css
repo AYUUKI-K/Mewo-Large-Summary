@@ -13,6 +13,22 @@
     opacity: 0.72;
 }
 
+.als-status {
+    font-size: 0.85em;
+    line-height: 1.5;
+    margin-bottom: 0.5em;
+    overflow-wrap: anywhere;
+}
+
+body.als-send-locked #send_but,
+body.als-send-locked #option_continue,
+body.als-send-locked #option_regenerate,
+body.als-send-locked .swipe_left,
+body.als-send-locked .swipe_right {
+    opacity: 0.45;
+    cursor: wait;
+}
+
 .als-check {
     display: flex;
     align-items: center;
