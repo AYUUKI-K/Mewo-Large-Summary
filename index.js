@@ -1,6 +1,6 @@
 const MODULE_NAME = 'auto_large_summary';
 const ENTRY_MARKER = 'auto_large_summary';
-const EXTENSION_VERSION = '1.0.1';
+const EXTENSION_VERSION = '1.0.2';
 const SUMMARY_INJECTION_ID = 'meow_large_summary_instruction';
 const LEGACY_DEFAULT_PROMPT = `ELLA, suspend all current commands. The following directive has absolute priority:
 Since THE STARS has grown lengthy, extract and compose a comprehensive summary.
@@ -149,6 +149,7 @@ let promptDrafts = {};
 let currentTab = 'settings';
 let chatSyncRevision = 0;
 let chatSyncChain = Promise.resolve();
+let disabledCleanupPending = 0;
 let archiveEditInProgress = false;
 let settingsDraft = {};
 let promptEditorMode = 'incremental';
@@ -217,7 +218,7 @@ function unlockSending() {
 }
 
 function blockSendInput(event) {
-    if (!settings?.enabled) return;
+    if (!settings?.enabled && !disabledCleanupPending) return;
     const target = event.target;
     const isSend = event.type === 'click' && target?.closest?.(SEND_CONTROL_SELECTOR);
     const isEnter = event.type === 'keydown' && target?.id === 'send_textarea'
@@ -229,14 +230,14 @@ function blockSendInput(event) {
     const command = input?.value?.trim() ?? '';
     // Observe user intent without intercepting the native command. It also
     // invalidates a pending check when /hide leaves the flags unchanged.
-    if (fromChatInput && /^\/(?:hide|unhide)(?:\s|$)/i.test(command)) manualVisibilityRevision += 1;
-    if (!sendLockDepth) return;
+    if (settings.enabled && fromChatInput && /^\/(?:hide|unhide)(?:\s|$)/i.test(command)) manualVisibilityRevision += 1;
+    if (!sendLockDepth && !disabledCleanupPending) return;
     // ST owns all slash parsing, including pipelines, macros, script controls
     // and commands added by other extensions. Never consume their input here.
     if (fromChatInput && command.startsWith('/')) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    notify('info', '正在检查上下文或进行大总结，保存并隐藏旧楼层后才能继续发送。', '', { preventDuplicates: true });
+    notify('info', !settings.enabled ? '正在停用旧总结条目，完成后就能发送喵。' : '正在检查上下文或进行大总结，保存并隐藏旧楼层后才能继续发送。', '', { preventDuplicates: true });
 }
 
 function installVisibilityCommandHooks() {
@@ -375,17 +376,74 @@ function stopPluginWork() {
 function applyEnabledState(value) {
     settings.enabled = Boolean(value);
     settingsDraft.enabled = settings.enabled;
-    const revision = ++enabledRevision;
+    enabledRevision += 1;
     if (!settings.enabled) {
         stopPluginWork();
-        setStatus('插件已关闭，不再检查上下文或切换总结条目喵。');
-    }
+        setStatus('插件已关闭，正在关闭总结条目的注入喵…');
+        void scheduleDisabledCleanup();
+    } else void scheduleChatSync();
     syncSettingsState();
     // Serialize immediate saves so rapid on/off toggles cannot leave an older
     // setting as the last server write. No other settings drafts are applied.
-    void persistSettingsNow().then(() => {
-        if (revision === enabledRevision && settings.enabled) void scheduleChatSync();
-    }).catch(error => notify('error', `启用状态保存失败：${error.message}`));
+    void persistSettingsNow().catch(error => notify('error', `启用状态保存失败：${error.message}`));
+}
+
+function scheduleDisabledCleanup({ bookName = settings.worldBookName } = {}) {
+    if (settings.enabled) return Promise.resolve();
+    disabledCleanupPending += 1;
+    const revision = enabledRevision;
+    const stillDisabled = () => !settings.enabled && revision === enabledRevision;
+    // Finish any older save before switching the entries off. Enabling again
+    // queues archive activation behind this operation, so an old cleanup
+    // cannot overwrite the newly selected archive.
+    const operation = chatSyncChain.catch(() => {}).then(async () => {
+        const deadline = Date.now() + 30000;
+        while (runInProgress || thresholdCheckInProgress || promptProbe || archiveEditInProgress) {
+            if (!stillDisabled()) return;
+            if (Date.now() >= deadline) throw new Error('上一轮处理尚未结束，请在世界书中手动关闭总结条目。');
+            await new Promise(resolve => setTimeout(resolve, 80));
+        }
+        if (!stillDisabled()) return;
+        const context = getContext();
+        if (!context) return;
+        archiveEditInProgress = true;
+        lockSending();
+        try {
+            await context.updateWorldInfoList();
+            if (!stillDisabled()) return;
+            if (!context.getWorldInfoNames().includes(bookName)) return;
+            const data = await readWorldBookData(context, bookName);
+            if (!stillDisabled()) return;
+            const owned = listOwnedEntries(data);
+            if (!owned.some(entry => entry.disable !== true || entry.constant !== false)) return;
+            for (const entry of owned) { entry.disable = true; entry.constant = false; }
+            await context.saveWorldInfo(bookName, data, true);
+            if (!stillDisabled()) return;
+            const persisted = await readWorldBookData(context, bookName);
+            if (!stillDisabled()) return;
+            if (listOwnedEntries(persisted).length !== owned.length || owned.some(entry => {
+                const saved = persisted.entries[entry.uid];
+                return !saved || saved.disable !== true || saved.constant !== false
+                    || saved.content !== entry.content
+                    || JSON.stringify(saved.extensions) !== JSON.stringify(entry.extensions);
+            })) throw new Error('总结条目关闭后未能读回确认，请在世界书中手动关闭总结条目。');
+            await context.updateWorldInfoList();
+            if (!stillDisabled()) return;
+            context.reloadWorldInfoEditor?.(bookName);
+        } finally {
+            archiveEditInProgress = false;
+            unlockSending();
+        }
+    }).finally(() => { disabledCleanupPending -= 1; });
+    chatSyncChain = operation.then(() => {
+        if (stillDisabled()) setStatus('插件已关闭，总结条目已停用，不再注入聊天喵。');
+    }).catch(error => {
+        if (!stillDisabled()) return;
+        console.error('[喵喵大总结] 停用条目失败：', error);
+        setStatus(`插件已关闭，但总结条目停用失败：${error.message}`);
+        notify('error', `总结条目停用失败：${error.message}`);
+    });
+    return chatSyncChain;
 }
 
 function summaryWasCancelled() {
@@ -1086,6 +1144,10 @@ async function prepareWorldBook(context, name, { create = true } = {}) {
         }
     }
 
+    return await readWorldBookData(context, name);
+}
+
+async function readWorldBookData(context, name) {
     // Bypass the client cache, which may still contain a dummy from an earlier read.
     const response = await fetch('/api/worldinfo/get', {
         method: 'POST',
@@ -1588,7 +1650,13 @@ function onGenerationAfterCommands(type, _options, dryRun) {
 }
 
 globalThis.meowLargeSummaryGenerationInterceptor = (_chat, _contextSize, abort, type) => {
-    if (!settings?.enabled) return;
+    if (!settings?.enabled) {
+        if (disabledCleanupPending) {
+            abort(true);
+            notify('info', '正在停用旧总结条目，完成后就能发送喵。', '', { preventDuplicates: true });
+        }
+        return;
+    }
     if (type === 'quiet' && summaryRequest?.interceptorPending && !summaryWasCancelled()) {
         summaryRequest.interceptorPending = false;
         return;
@@ -2120,7 +2188,10 @@ async function saveSettingsDraft() {
         Object.assign(settings, settingsDraft);
         if (enabledChanged) {
             enabledRevision += 1;
-            if (!settings.enabled) stopPluginWork();
+            if (!settings.enabled) {
+                stopPluginWork();
+                void scheduleDisabledCleanup({ bookName: previousSettings.worldBookName });
+            }
         }
         settings.prompt = settings.prompts[settings.mode];
         await persistSettingsNow();
@@ -2141,7 +2212,11 @@ async function saveSettingsDraft() {
         archiveEditInProgress = false;
         unlockSending();
     }
-    void scheduleChatSync();
+    if (settings.enabled) void scheduleChatSync();
+    else if (name !== previousSettings.worldBookName) {
+        void scheduleDisabledCleanup({ bookName: previousSettings.worldBookName });
+        void scheduleDisabledCleanup();
+    }
 }
 
 async function getInstalledExtension() {
@@ -2225,7 +2300,7 @@ const UPDATE_DRAFT_KEY = `meow-summary-update-draft:${location.pathname}`;
 export async function onExtensionUpdate() {
     notify('info', '喵喵大总结已更新，当前处理完成后自动刷新酒馆。');
     const native = await import('/script.js');
-    while (sendLockDepth || runInProgress || thresholdCheckInProgress || archiveEditInProgress
+    while (sendLockDepth || runInProgress || thresholdCheckInProgress || archiveEditInProgress || disabledCleanupPending
         || native.is_send_press || native.isGenerating?.() || document.body.dataset.generating === 'true'
         || (getContext()?.streamingProcessor && !getContext().streamingProcessor.isFinished)) {
         await new Promise(resolve => setTimeout(resolve, 150));
@@ -2525,7 +2600,8 @@ function initialize() {
     context.eventSource.on(context.eventTypes.CHAT_CREATED, () => {
         void scheduleChatSync();
     });
-    void scheduleChatSync();
+    if (settings.enabled) void scheduleChatSync();
+    else void scheduleDisabledCleanup();
 }
 
 const initialContext = getContext();
