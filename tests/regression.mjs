@@ -52,6 +52,8 @@ async function fixture(savedSettings = {}) {
         isGenerating: () => false,
         async saveSettings() { savedPreferences.push(structuredClone(context.extensionSettings)); },
     };
+    const tokenRenders = [];
+    const openai = { promptManager: { render: value => tokenRenders.push(value) } };
     const sandbox = createContext({
         console: { ...console, error() {}, warn() {} }, structuredClone, setTimeout, clearTimeout, URL,
         location: { origin: 'http://st.local' },
@@ -80,15 +82,17 @@ async function fixture(savedSettings = {}) {
         blockSendInput, lockSending, unlockSending, getSettings, applyEnabledState,
         onGenerationAfterCommands, onMainApiRequest, onFinalPromptData, onTemplatePreviewContext,
         assemblePrompt, countAssembledPrompt, runLargeSummary, checkAfterReply, stripReasoning, isSameArchive,
+        installVisibilityCommandHooks, refreshVisibilityTokens,
         evaluate: code => eval(code),
         state: () => ({ sendLockDepth, runInProgress, thresholdCheckInProgress, pendingGeneration, settings })
     };`, {
         context: sandbox,
         initializeImportMeta(meta) { meta.url = 'http://st.local/scripts/extensions/third-party/Mewo-Large-Summary/index.js'; },
         async importModuleDynamically(specifier) {
-            assert.equal(specifier, '/script.js');
-            const imported = new SyntheticModule(Object.keys(native), function () {
-                for (const [key, value] of Object.entries(native)) this.setExport(key, value);
+            assert.ok(['/script.js', '/scripts/openai.js'].includes(specifier), specifier);
+            const exports = specifier === '/script.js' ? native : openai;
+            const imported = new SyntheticModule(Object.keys(exports), function () {
+                for (const [key, value] of Object.entries(exports)) this.setExport(key, value);
             }, { context: sandbox });
             await imported.link(() => {});
             await imported.evaluate();
@@ -112,7 +116,7 @@ async function fixture(savedSettings = {}) {
         });
     };
     return {
-        api, sandbox, event, input, send, guarded, body, notices, writes, executed, savedPreferences,
+        api, sandbox, event, input, send, guarded, body, notices, writes, executed, savedPreferences, tokenRenders,
         context: initialContext, setContext: next => { context = next; },
         interceptor: sandbox[manifest.generate_interceptor],
         prepareSummary({ nativeRequest = false } = {}) {
@@ -125,18 +129,175 @@ async function fixture(savedSettings = {}) {
     };
 }
 
-test('later summaries hide only the new range and preserve user-unhidden old floors', async () => {
+test('each newly saved summary runs one native hide from zero; manual unhide persists between rounds', async () => {
     const f = await fixture();
     f.prepareSummary();
     await f.api.runLargeSummary();
     assert.equal(f.executed.at(-1), '/hide 0-9');
     await f.context.executeSlashCommandsWithOptions('/unhide 0-9');
+    assert.ok(f.context.chat.every(message => !message.is_system));
     f.context.chat.push({ mes: '新剧情', is_user: false, is_system: false, name: '角色 A' });
     await f.api.runLargeSummary();
-    assert.equal(f.executed.at(-1), '/hide 10-10');
-    assert.ok(f.context.chat.slice(0, 10).every(message => !message.is_system));
+    assert.equal(f.executed.at(-1), '/hide 0-10');
+    assert.equal(f.executed.filter(command => command.startsWith('/hide ')).length, 2);
+    assert.ok(f.context.chat.slice(0, 10).every(message => message.is_system));
     assert.equal(f.context.chat[10].is_system, true);
     assert.ok(f.context.chat.slice(11).every(message => !message.is_system));
+});
+
+test('manual unhide refreshes native cached tokens without triggering another summary above threshold', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    await f.api.runLargeSummary();
+    f.context.mainApi = 'openai';
+    f.context.getTokenCountAsync = async prompt => Number(prompt);
+    let assembled = 0;
+    f.context.generate = async (_type, _options, dryRun) => {
+        assert.equal(dryRun, true);
+        assembled++;
+        f.api.onFinalPromptData({ prompt: String(f.context.chat.filter(message => !message.is_system).length * 2500) }, true);
+    };
+    await f.api.refreshVisibilityTokens(f.context);
+    assert.match(f.api.evaluate("ui.querySelector('.als-status').textContent"), /50,000/);
+    await f.context.executeSlashCommandsWithOptions('/unhide 0-9999');
+    const commands = f.executed.length;
+    const writes = f.writes.length;
+    await f.api.refreshVisibilityTokens(f.context);
+    assert.match(f.api.evaluate("ui.querySelector('.als-status').textContent"), /75,000/);
+    assert.equal(f.context.chatMetadata.auto_large_summary.lastPromptTokens, 75000);
+    assert.deepEqual(f.tokenRenders, [false, false]);
+    assert.equal(assembled, 2);
+    assert.ok(f.context.chat.every(message => !message.is_system));
+    assert.equal(f.executed.length, commands);
+    assert.equal(f.writes.length, writes);
+    assert.equal(f.api.state().sendLockDepth, 0);
+});
+
+test('visibility hooks preserve the native parser, arguments, receiver, result, errors and completion order', async () => {
+    const f = await fixture();
+    const events = [];
+    const result = { pipe: 'native result' };
+    const named = { name: '角色 A', _scope: {} };
+    const failure = new Error('native command failed');
+    const hide = { helpString: 'native help', aliases: [], async callback(...args) {
+        assert.equal(this, hide);
+        assert.equal(args[0], named);
+        assert.equal(args[1], '0-9999');
+        events.push('native saved');
+        return result;
+    } };
+    f.context.SlashCommandParser = { commands: { hide, unhide: { callback: async () => { throw failure; } } } };
+    f.context.onVisibilitySaved = context => {
+        assert.equal(context, f.context);
+        events.push('refresh scheduled');
+    };
+    f.api.evaluate('scheduleVisibilityRefresh = context => __fixtures.context.onVisibilitySaved(context)');
+    f.api.installVisibilityCommandHooks();
+    const callback = hide.callback;
+    f.api.installVisibilityCommandHooks();
+    assert.equal(hide.callback, callback, 'must not double wrap');
+    assert.equal(hide.helpString, 'native help');
+    assert.equal(await hide.callback(named, '0-9999'), result);
+    assert.deepEqual(events, ['native saved', 'refresh scheduled']);
+    await assert.rejects(f.context.SlashCommandParser.commands.unhide.callback({}, '0-9999'), error => error === failure);
+});
+
+test('plugin native hide is not treated as a manual edit and hides exactly once after saving', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    const nativeExecute = f.context.executeSlashCommandsWithOptions.bind(f.context);
+    const hide = { callback: async (_args, range) => {
+        assert.equal(f.writes.length, 1, 'must save before hiding');
+        return nativeExecute(`/hide ${range}`);
+    } };
+    f.context.SlashCommandParser = { commands: { hide } };
+    f.context.executeSlashCommandsWithOptions = command => hide.callback({}, command.slice(6));
+    f.api.installVisibilityCommandHooks();
+    const revision = f.api.evaluate('manualVisibilityRevision');
+    assert.equal(await f.api.runLargeSummary(), true);
+    assert.equal(f.api.evaluate('manualVisibilityRevision'), revision);
+    assert.equal(f.api.evaluate('summaryHideInProgress'), false);
+    assert.deepEqual(f.executed, ['/hide 0-9']);
+});
+
+test('a native unhide completion automatically schedules the recount even when automatic summaries are disabled', async () => {
+    const f = await fixture({ enabled: false });
+    const nativeExecute = f.context.executeSlashCommandsWithOptions.bind(f.context);
+    f.context.SlashCommandParser = { commands: { unhide: { callback: async (_args, range) => nativeExecute(`/unhide ${range}`) } } };
+    f.context.mainApi = 'openai';
+    f.context.getTokenCountAsync = async prompt => Number(prompt);
+    f.context.generate = async () => f.api.onFinalPromptData({ prompt: String(f.context.chat.filter(message => !message.is_system).length * 2500) }, true);
+    await nativeExecute('/hide 0-9');
+    f.api.installVisibilityCommandHooks();
+    await f.context.SlashCommandParser.commands.unhide.callback({}, '0-9999');
+    const deadline = Date.now() + 2000;
+    while (!f.tokenRenders.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+    assert.deepEqual(f.tokenRenders, [false]);
+    assert.match(f.api.evaluate("ui.querySelector('.als-status').textContent"), /75,000/);
+    assert.deepEqual(f.executed, ['/hide 0-9', '/unhide 0-9999']);
+    assert.ok(f.context.chat.every(message => !message.is_system));
+    assert.equal(f.writes.length, 0);
+});
+
+test('manual commands still execute during a token preview and invalidate that preview', async () => {
+    const f = await fixture();
+    const nativeExecute = f.context.executeSlashCommandsWithOptions.bind(f.context);
+    f.context.SlashCommandParser = { commands: { unhide: { callback: async (_args, range) => nativeExecute(`/unhide ${range}`) } } };
+    f.api.evaluate('scheduleVisibilityRefresh = () => { visibilityRefreshRevision++; }');
+    f.api.installVisibilityCommandHooks();
+    await nativeExecute('/hide 0-9999');
+    f.context.mainApi = 'openai';
+    f.context.getTokenCountAsync = async () => 1000;
+    f.context.generate = async () => {
+        assert.equal(f.api.evaluate('requestPreview'), true);
+        await f.context.SlashCommandParser.commands.unhide.callback({}, '0-9999');
+        f.api.onFinalPromptData({ prompt: 'outdated prompt' }, true);
+    };
+    await f.api.refreshVisibilityTokens(f.context);
+    assert.ok(f.context.chat.every(message => !message.is_system));
+    assert.deepEqual(f.tokenRenders, []);
+    assert.equal(f.api.state().sendLockDepth, 0);
+});
+
+test('visibility refresh failures release the lock and never change floors or repeat commands', async () => {
+    const f = await fixture();
+    await f.context.executeSlashCommandsWithOptions('/hide 0-9999');
+    f.context.generate = async () => { throw new Error('preview unavailable'); };
+    await f.api.refreshVisibilityTokens(f.context);
+    assert.equal(f.api.state().sendLockDepth, 0);
+    assert.equal(f.api.evaluate('requestPreview'), false);
+    assert.ok(f.context.chat.every(message => message.is_system));
+    assert.deepEqual(f.executed, ['/hide 0-9999']);
+    assert.match(f.api.evaluate("ui.querySelector('.als-status').textContent"), /token 刷新失败/);
+});
+
+test('switching archives or receiving a newer command during recount discards outdated counts', async () => {
+    for (const action of ['switch', 'new-command']) {
+        const f = await fixture();
+        f.context.mainApi = 'openai';
+        f.context.getTokenCountAsync = async () => 75000;
+        f.context.generate = async () => {
+            f.api.onFinalPromptData({ prompt: 'preview' }, true);
+            if (action === 'switch') f.setContext({ ...f.context, chatId: 'chat-b', chat: [] });
+            else f.api.evaluate('visibilityRefreshRevision++');
+        };
+        await f.api.refreshVisibilityTokens(f.context);
+        assert.deepEqual(f.tokenRenders, []);
+        assert.equal(f.api.state().sendLockDepth, 0);
+        assert.equal(f.executed.length, 0);
+    }
+});
+
+test('floor 666 example runs hide 0-646 once and manual unhide restores every floor', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    f.context.chat = Array.from({ length: 667 }, (_, i) => ({ mes: `楼层 ${i}`, is_user: false, is_system: false }));
+    await f.api.runLargeSummary();
+    assert.deepEqual(f.executed, ['/hide 0-646']);
+    await f.context.executeSlashCommandsWithOptions('/unhide 0-9999');
+    assert.ok(f.context.chat.every(message => !message.is_system));
+    await f.api.runLargeSummary();
+    assert.deepEqual(f.executed, ['/hide 0-646', '/unhide 0-9999']);
 });
 
 test('hide 0-9999 stays hidden through idle sync and another attempted summary', async () => {

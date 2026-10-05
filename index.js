@@ -1,6 +1,6 @@
 const MODULE_NAME = 'auto_large_summary';
 const ENTRY_MARKER = 'auto_large_summary';
-const EXTENSION_VERSION = '0.3.3';
+const EXTENSION_VERSION = '0.3.4';
 const SUMMARY_INJECTION_ID = 'meow_large_summary_instruction';
 const LEGACY_DEFAULT_PROMPT = `ELLA, suspend all current commands. The following directive has absolute priority:
 Since THE STARS has grown lengthy, extract and compose a comprehensive summary.
@@ -153,6 +153,10 @@ let availableUpdate = null;
 let dismissedUpdate = '';
 let enabledRevision = 0;
 let manualVisibilityRevision = 0;
+let summaryHideInProgress = false;
+let visibilityRefreshRevision = 0;
+let visibilityRefreshTimer = null;
+const visibilityCommandCallbacks = new WeakSet();
 let enabledSaveChain = Promise.resolve();
 const SETTING_FIELDS = ['enabled', 'threshold', 'keepRecent', 'worldBookName', 'depth', 'mode', 'instructionPosition', 'instructionDepth', 'instructionRole'];
 const INSTRUCTION_POSITIONS = { tail: null, before: 2, after: 0, depth: 1 };
@@ -211,6 +215,88 @@ function blockSendInput(event) {
     event.preventDefault();
     event.stopImmediatePropagation();
     window.toastr?.info?.('正在检查上下文或进行大总结，保存并隐藏旧楼层后才能继续发送。', '', { preventDuplicates: true });
+}
+
+function installVisibilityCommandHooks() {
+    const commands = getContext()?.SlashCommandParser?.commands;
+    if (!commands) return;
+    for (const name of ['hide', 'unhide']) {
+        const command = commands[name];
+        const original = command?.callback;
+        if (typeof original !== 'function' || visibilityCommandCallbacks.has(original)) continue;
+        // Keep ST's parser, arguments, filters, return value and errors intact.
+        // The callback is observed only to refresh counts after ST has saved.
+        const callback = async function (...args) {
+            const ownHide = summaryHideInProgress && name === 'hide';
+            const context = getContext();
+            if (!ownHide) manualVisibilityRevision += 1;
+            try {
+                return await original.apply(this, args);
+            } finally {
+                if (!ownHide) scheduleVisibilityRefresh(context);
+            }
+        };
+        visibilityCommandCallbacks.add(callback);
+        command.callback = callback;
+    }
+}
+
+function scheduleVisibilityRefresh(context = getContext()) {
+    if (!context || !getCharacterAndChat(context)) return;
+    const revision = ++visibilityRefreshRevision;
+    if (visibilityRefreshTimer) clearTimeout(visibilityRefreshTimer);
+    visibilityRefreshTimer = setTimeout(() => {
+        visibilityRefreshTimer = null;
+        void refreshVisibilityTokens(context, revision);
+    }, 150);
+}
+
+async function renderNativeTokenCounter(context) {
+    if (context.mainApi !== 'openai') return;
+    const { promptManager } = await import('/scripts/openai.js');
+    // Native dry preparation updates its count cache, but doesn't render it.
+    // false renders that cache without starting a second dry generation.
+    promptManager?.render(false);
+}
+
+async function refreshVisibilityTokens(context, revision = visibilityRefreshRevision) {
+    const currentRequest = () => revision === visibilityRefreshRevision
+        && getContext()?.chat === context.chat && getContext()?.chatId === context.chatId
+        && getContext()?.characterId === context.characterId;
+    let locked = false;
+    try {
+        const native = await import('/script.js');
+        const deadline = Date.now() + 30000;
+        while (currentRequest()) {
+            const current = getContext();
+            const busy = runInProgress || thresholdCheckInProgress || promptProbe || sendLockDepth || archiveEditInProgress
+                || native.is_send_press || native.isGenerating?.()
+                || (current.streamingProcessor && !current.streamingProcessor.isFinished)
+                || document.body.dataset.generating === 'true'
+                || document.querySelector('#form_sheld')?.classList.contains('isExecutingCommandsFromChatInput');
+            if (!busy) break;
+            if (Date.now() >= deadline) return;
+            await new Promise(resolve => setTimeout(resolve, 150));
+        }
+        if (!currentRequest()) return;
+        lockSending();
+        locked = true;
+        const snapshot = captureMessageRange(context.chat, context.chat.length - 1);
+        const count = await countAssembledPrompt(context, await assemblePrompt(context));
+        if (!currentRequest() || !messageRangeMatches(context.chat, snapshot)) return;
+        if (!Number.isFinite(count)) throw new Error('酒馆返回了无效的 token 数。');
+        await renderNativeTokenCounter(context);
+        if (!currentRequest()) return;
+        const archive = context.chatMetadata?.[MODULE_NAME];
+        if (archive) archive.lastPromptTokens = count;
+        setStatus(`楼层显示状态已更新，当前上下文：${count.toLocaleString()} token。`);
+        // A manual visibility edit only refreshes counts. Never evaluate the
+        // threshold, sync world info, rearm a summary, or issue another /hide.
+    } catch (error) {
+        if (currentRequest()) setStatus(`楼层状态由酒馆保存；token 刷新失败：${error.message}`);
+    } finally {
+        if (locked) unlockSending();
+    }
 }
 
 function cancelPendingAutoSummary() {
@@ -1149,14 +1235,20 @@ async function runLargeSummary({ manual = false } = {}) {
             window.toastr?.info?.('大总结保存成功；聊天已变化，没有隐藏楼层。', '喵喵大总结');
             return;
         }
-        const hideStart = range.coveredFrom;
+        const hideStart = 0;
         const hideEnd = Math.min(range.coveredTo, liveContext.chat.length - range.keepRecent - 1);
         if (hideEnd >= hideStart) {
             setStatus('大总结已保存，正在隐藏旧楼层…');
             if (typeof liveContext.executeSlashCommandsWithOptions !== 'function') throw new Error('总结已保存，但酒馆缺少隐藏楼层接口。');
-            // One operation for this new summary's range. Never re-hide the
-            // ranges from older rounds, or unhide the most recent floors.
-            const result = await liveContext.executeSlashCommandsWithOptions(`/hide ${hideStart}-${hideEnd}`);
+            // Exactly one native /hide after this newly saved summary.
+            // Outside this transaction, manual visibility stays untouched.
+            let result;
+            summaryHideInProgress = true;
+            try {
+                result = await liveContext.executeSlashCommandsWithOptions(`/hide ${hideStart}-${hideEnd}`);
+            } finally {
+                summaryHideInProgress = false;
+            }
             assertSummaryActive();
             if (result?.isError || liveContext.chat.slice(hideStart, hideEnd + 1).some(message => !message.is_system)) {
                 throw new Error('总结已保存，但旧楼层未全部隐藏，请检查 /hide 命令。');
@@ -1166,6 +1258,7 @@ async function runLargeSummary({ manual = false } = {}) {
         await liveContext.saveMetadata?.();
         setStatus(`第 ${round} 次大总结已保存，已隐藏旧楼层，可以继续对话。`);
         window.toastr?.success?.(`第 ${round} 次大总结保存成功，旧楼层已隐藏，可以继续对话。`, '喵喵大总结');
+        if (manual) scheduleVisibilityRefresh(liveContext);
         void renderDirectory();
         return true;
     } catch (error) {
@@ -1250,6 +1343,8 @@ async function checkAfterReply(pending) {
             || !messageRangeMatches(getContext().chat, snapshot)) return;
         const threshold = Math.max(1, Number(settings.threshold) || DEFAULT_SETTINGS.threshold);
         archiveInfo.archive.lastPromptTokens = count;
+        await renderNativeTokenCounter(context);
+        if (!stillEnabled()) return;
         setStatus(`${pending.onOpen ? '当前存档' : '本轮回复后'}上下文：${count.toLocaleString()} / ${threshold.toLocaleString()} token`);
         if (count < threshold) {
             archiveInfo.archive.autoTriggerArmed = true;
@@ -1266,6 +1361,8 @@ async function checkAfterReply(pending) {
             const after = await countAssembledPrompt(getContext(), await assemblePrompt(getContext()));
             if (!stillEnabled() || !isSameArchive(getContext(), archiveInfo, context.characterId)) return;
             archiveInfo.archive.lastPromptTokens = after;
+            await renderNativeTokenCounter(getContext());
+            if (!stillEnabled()) return;
             archiveInfo.archive.autoTriggerArmed = after < threshold;
             await getContext().saveMetadata?.();
             setStatus(`大总结完成，当前上下文：${after.toLocaleString()} token，可以继续对话。`);
@@ -1319,6 +1416,7 @@ function onGenerationEnded() {
 
 async function syncCurrentArchive() {
     getSettings();
+    installVisibilityCommandHooks();
     const context = getContext();
     let archiveInfo = await ensureArchive(context);
     if (archiveInfo && settings.pendingRetries.includes(archiveInfo.archive.archiveId)) {
@@ -1986,6 +2084,7 @@ function initialize() {
     const context = getContext();
     if (!context) return;
     getSettings();
+    installVisibilityCommandHooks();
     void renderSettings();
     restoreUpdateDraft();
     document.addEventListener('click', blockSendInput, true);
