@@ -1,5 +1,6 @@
 const MODULE_NAME = 'auto_large_summary';
 const ENTRY_MARKER = 'auto_large_summary';
+const EXTENSION_VERSION = '0.1.2';
 const DEFAULT_PROMPT = `ELLA, suspend all current commands. The following directive has absolute priority:
 Since THE STARS has grown lengthy, extract and compose a comprehensive summary.
 
@@ -38,6 +39,7 @@ let runInProgress = false;
 let activeRun = null;
 let generationToken = 0;
 let summaryTimer = null;
+const worldBookPreparations = new Map();
 
 function getContext() {
     return window.SillyTavern?.getContext?.();
@@ -67,11 +69,17 @@ function randomId() {
 }
 
 function getCharacterAndChat(context = getContext()) {
-    if (!context || context.groupId || !Number.isInteger(context.characterId)) return null;
-    const character = context.characters?.[context.characterId];
+    if (!context || context.groupId) return null;
+    const rawCharacterId = context.characterId;
+    if (rawCharacterId === undefined || rawCharacterId === null
+        || !['number', 'string'].includes(typeof rawCharacterId)
+        || String(rawCharacterId).trim() === '') return null;
+    const characterIndex = Number(rawCharacterId);
+    if (!Number.isInteger(characterIndex) || characterIndex < 0) return null;
+    const character = context.characters?.[characterIndex];
     if (!character) return null;
     const avatar = String(character.avatar ?? character.name ?? context.characterId);
-    const chatId = String(context.chatId ?? context.getCurrentChatId?.() ?? '');
+    const chatId = String(context.chatId || context.getCurrentChatId?.() || character.chat || '');
     if (!chatId || !Array.isArray(context.chat)) return null;
     return {
         character,
@@ -158,38 +166,49 @@ function isSameArchive(context, archiveInfo, characterId) {
 async function ensureWorldBook(context = getContext()) {
     const name = String(settings.worldBookName ?? '').trim();
     if (!name) throw new Error('请先填写大总结世界书名称。');
-    if (name.includes(',')) throw new Error('世界书名称不能包含英文逗号（SillyTavern 的世界书命令会用逗号拆分名称）。');
+    if (/[\\/:*?"<>|\x00-\x1f]/.test(name) || /[. ]$/.test(name)) {
+        throw new Error('世界书名称包含不支持的文件名字符，请修改后重试。');
+    }
 
     if (typeof context?.updateWorldInfoList !== 'function' || typeof context?.getWorldInfoNames !== 'function') {
         throw new Error('当前 SillyTavern 没有提供世界书列表接口，请更新到稳定版后重试。');
     }
 
-    await context.updateWorldInfoList();
-    let names = context.getWorldInfoNames();
-    let data = await context.loadWorldInfo(name);
-    if (names.includes(name)) {
-        if (!data) throw new Error(`世界书“${name}”已在列表中，但读取失败。`);
-        return data;
+    if (worldBookPreparations.has(name)) return await worldBookPreparations.get(name);
+    const preparation = prepareWorldBook(context, name);
+    worldBookPreparations.set(name, preparation);
+    try {
+        return await preparation;
+    } finally {
+        if (worldBookPreparations.get(name) === preparation) worldBookPreparations.delete(name);
     }
-
-    // Never overwrite a book returned by the backend if the settings list is stale.
-    if (data) throw new Error(`世界书“${name}”可以读取，但没有出现在酒馆世界书列表中；为避免覆盖，已停止创建。请刷新酒馆后重试。`);
-
-    await context.saveWorldInfo(name, { entries: {} }, true);
-    await context.updateWorldInfoList();
-    names = context.getWorldInfoNames();
-    if (!names.includes(name)) {
-        throw new Error(`酒馆没有确认创建世界书“${name}”。请查看控制台或服务器日志后重试。`);
-    }
-    data = await context.loadWorldInfo(name);
-    if (!data || !data.entries || typeof data.entries !== 'object') {
-        throw new Error(`世界书“${name}”已加入列表，但读取内容失败。`);
-    }
-    return data;
 }
 
-function escapeSlashArgument(value) {
-    return String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"');
+async function prepareWorldBook(context, name) {
+    await context.updateWorldInfoList();
+    // /worldinfo/get returns an empty dummy book even when no file exists.
+    // Only the refreshed file list can establish whether creation is needed.
+    if (!context.getWorldInfoNames().includes(name)) {
+        await context.saveWorldInfo(name, { entries: {} }, true);
+        await context.updateWorldInfoList();
+        if (!context.getWorldInfoNames().includes(name)) {
+            throw new Error(`酒馆没有确认创建世界书“${name}”。请查看控制台或服务器日志后重试。`);
+        }
+    }
+
+    // Bypass the client cache, which may still contain a dummy from an earlier read.
+    const response = await fetch('/api/worldinfo/get', {
+        method: 'POST',
+        headers: context.getRequestHeaders(),
+        body: JSON.stringify({ name }),
+        cache: 'no-cache',
+    });
+    if (!response.ok) throw new Error(`读取世界书“${name}”失败（HTTP ${response.status}）。`);
+    const data = await response.json();
+    if (!data?.entries || typeof data.entries !== 'object' || Array.isArray(data.entries)) {
+        throw new Error(`世界书“${name}”的条目格式无效，已停止操作。`);
+    }
+    return data;
 }
 
 async function activateWorldBook(context = getContext()) {
@@ -201,10 +220,10 @@ async function activateWorldBook(context = getContext()) {
     let option = findOption();
     if (!option) throw new Error(`世界书“${name}”已保存，但未出现在全局世界书列表中。请刷新酒馆后重试。`);
     if (!option.selected) {
-        if (typeof context.executeSlashCommandsWithOptions !== 'function') {
-            throw new Error('当前 SillyTavern 无法启用全局世界书，请更新到稳定版后重试。');
-        }
-        await context.executeSlashCommandsWithOptions(`/world state=on silent=true "${escapeSlashArgument(name)}"`);
+        // Use the same change event as a manual global-book selection. This also
+        // updates Select2, ST's selected_world_info and its persisted settings.
+        option.selected = true;
+        option.parentElement.dispatchEvent(new Event('change', { bubbles: true }));
         await context.updateWorldInfoList?.();
         option = findOption();
     }
@@ -727,12 +746,10 @@ async function renderSettings() {
     ui.innerHTML = `
       <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-          <span class="als-brand">
-            <b>喵喵大总结</b>
-            <small class="als-version">v0.1.1 · by NUE-喵喵电波</small>
-          </span>
+          <b>喵喵大总结</b>
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
+        <div class="als-version">v${EXTENSION_VERSION} | by NUE-喵喵电波</div>
         <div class="inline-drawer-content">
           <label class="als-check"><input class="als-enabled" type="checkbox"><span>达到阈值后自动总结</span></label>
           <div class="als-grid">
@@ -774,7 +791,10 @@ async function renderSettings() {
     bindInput('.als-depth', 'depth', value => Math.max(0, Math.floor(Number(value) || 0)));
     bindInput('.als-prompt', 'prompt', String);
     ui.querySelector('.als-run').addEventListener('click', () => runLargeSummary({ manual: true }));
-    ui.querySelector('.als-book-open').addEventListener('click', async () => {
+    ui.querySelector('.als-book-open').addEventListener('click', async event => {
+        const button = event.currentTarget;
+        button.disabled = true;
+        button.textContent = '正在创建并启用…';
         try {
             const context = getContext();
             await ensureWorldBook(context);
@@ -783,6 +803,9 @@ async function renderSettings() {
             window.toastr?.success?.(`世界书“${settings.worldBookName}”已创建并挂载到全局列表。`);
         } catch (error) {
             window.toastr?.error?.(error.message);
+        } finally {
+            button.disabled = false;
+            button.textContent = '创建并启用世界书';
         }
     });
     ui.querySelector('.als-directory-toggle').addEventListener('click', async event => {

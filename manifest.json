@@ -4,7 +4,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "NUE-喵喵电波",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "auto_update": false,
   "generate_interceptor": "autoLargeSummaryGenerationInterceptor"
 }
