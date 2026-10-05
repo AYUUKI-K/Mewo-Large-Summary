@@ -3,8 +3,8 @@
   "loading_order": 100,
   "js": "index.js",
   "css": "style.css",
-  "author": "Auto Large Summary contributors",
-  "version": "0.1.0",
+  "author": "NUE-喵喵电波",
+  "version": "0.1.1",
   "auto_update": false,
   "generate_interceptor": "autoLargeSummaryGenerationInterceptor"
 }
