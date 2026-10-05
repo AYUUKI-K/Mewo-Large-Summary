@@ -205,6 +205,45 @@
     min-width: 0;
 }
 
+.als-directory-heading {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    width: 100%;
+    min-width: 0;
+}
+
+.als-directory-count {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.als-settings .als-directory-refresh {
+    width: auto !important;
+    min-width: 6em;
+    padding: 0.5em 0.7em;
+    white-space: nowrap !important;
+    writing-mode: horizontal-tb;
+    word-break: keep-all;
+}
+
+.als-settings .als-model-select {
+    color-scheme: light dark;
+    min-height: 2.6em;
+    text-overflow: ellipsis;
+}
+
+@media (max-width: 600px) {
+    .als-model-state {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .als-settings .als-model-fetch {
+        width: 100% !important;
+        min-height: 2.6em;
+    }
+}
+
 .als-panel > .als-run {
     width: 100%;
     min-height: 2.6em;

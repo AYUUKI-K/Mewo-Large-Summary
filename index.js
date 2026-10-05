@@ -1,6 +1,6 @@
 const MODULE_NAME = 'auto_large_summary';
 const ENTRY_MARKER = 'auto_large_summary';
-const EXTENSION_VERSION = '1.0.0';
+const EXTENSION_VERSION = '1.0.1';
 const SUMMARY_INJECTION_ID = 'meow_large_summary_instruction';
 const LEGACY_DEFAULT_PROMPT = `ELLA, suspend all current commands. The following directive has absolute priority:
 Since THE STARS has grown lengthy, extract and compose a comprehensive summary.
@@ -136,7 +136,7 @@ let requestPreview = false;
 let thresholdCheckInProgress = false;
 let sendLockDepth = 0;
 const lockedControls = new Map();
-const SEND_CONTROL_SELECTOR = '#send_but, #option_continue, #option_regenerate, .swipe_left, .swipe_right, .als-settings input:not(.als-enabled), .als-settings .als-mode, .als-settings .als-api-mode, .als-model-fetch, .als-settings .als-instruction-position, .als-settings .als-instruction-role, .als-settings .als-prompt, .als-run, .als-settings-save, .als-settings-reset, .als-prompt-save, .als-prompt-reset, .als-delete-archive, .als-delete-round, .als-update-apply';
+const SEND_CONTROL_SELECTOR = '#send_but, #option_continue, #option_regenerate, .swipe_left, .swipe_right, .als-settings input:not(.als-enabled), .als-settings .als-mode, .als-settings .als-api-mode, .als-model-select, .als-model-fetch, .als-settings .als-instruction-position, .als-settings .als-instruction-role, .als-settings .als-prompt, .als-run, .als-settings-save, .als-settings-reset, .als-prompt-save, .als-prompt-reset, .als-delete-archive, .als-delete-round, .als-update-apply';
 const worldBookPreparations = new Map();
 const MODE_LABELS = { incremental: '多次大总结', merged: '合并大总结' };
 const DIRECTORY_PAGE_SIZE = 8;
@@ -213,9 +213,11 @@ function unlockSending() {
     if (deleteRound) deleteRound.disabled = !selectedSummary || ui.querySelector('.als-history-select').value === 'all';
     const modelButton = ui?.querySelector('.als-model-fetch');
     if (modelButton) modelButton.disabled = Boolean(modelFetchController);
+    syncOperationalControls();
 }
 
 function blockSendInput(event) {
+    if (!settings?.enabled) return;
     const target = event.target;
     const isSend = event.type === 'click' && target?.closest?.(SEND_CONTROL_SELECTOR);
     const isEnter = event.type === 'keydown' && target?.id === 'send_textarea'
@@ -238,6 +240,7 @@ function blockSendInput(event) {
 }
 
 function installVisibilityCommandHooks() {
+    if (!settings?.enabled) return;
     const commands = getContext()?.SlashCommandParser?.commands;
     if (!commands) return;
     for (const name of ['hide', 'unhide']) {
@@ -247,6 +250,7 @@ function installVisibilityCommandHooks() {
         // Keep ST's parser, arguments, filters, return value and errors intact.
         // The callback is observed only to refresh counts after ST has saved.
         const callback = async function (...args) {
+            if (!settings?.enabled) return await original.apply(this, args);
             const ownHide = summaryHideInProgress && name === 'hide';
             const context = getContext();
             if (!ownHide) manualVisibilityRevision += 1;
@@ -262,7 +266,7 @@ function installVisibilityCommandHooks() {
 }
 
 function scheduleVisibilityRefresh(context = getContext(), { afterSummary = false } = {}) {
-    if (!context || !getCharacterAndChat(context)) return;
+    if (!settings?.enabled || !context || !getCharacterAndChat(context)) return;
     const revision = ++visibilityRefreshRevision;
     if (visibilityRefreshTimer) clearTimeout(visibilityRefreshTimer);
     visibilityRefreshTimer = setTimeout(() => {
@@ -280,11 +284,13 @@ async function renderNativeTokenCounter(context) {
 }
 
 async function refreshVisibilityTokens(context, revision = visibilityRefreshRevision, { afterSummary = false } = {}) {
-    const currentRequest = () => revision === visibilityRefreshRevision
+    const startEnabledRevision = enabledRevision;
+    const currentRequest = () => settings?.enabled && enabledRevision === startEnabledRevision && revision === visibilityRefreshRevision
         && getContext()?.chat === context.chat && getContext()?.chatId === context.chatId
         && getContext()?.characterId === context.characterId;
     let locked = false;
     try {
+        if (!currentRequest()) return;
         const native = await import('/script.js');
         const deadline = Date.now() + 30000;
         while (currentRequest()) {
@@ -302,7 +308,9 @@ async function refreshVisibilityTokens(context, revision = visibilityRefreshRevi
         lockSending();
         locked = true;
         const snapshot = captureMessageRange(context.chat, context.chat.length - 1);
-        const count = await countAssembledPrompt(context, await assemblePrompt(context));
+        const assembled = await assemblePrompt(context);
+        if (!currentRequest()) return;
+        const count = await countAssembledPrompt(context, assembled);
         if (!currentRequest() || !messageRangeMatches(context.chat, snapshot)) return;
         if (!Number.isFinite(count)) throw new Error('酒馆返回了无效的 token 数。');
         await renderNativeTokenCounter(context);
@@ -335,7 +343,7 @@ function cancelPendingAutoSummary() {
     summaryTimer = null;
     if (pendingGeneration?.locked) unlockSending();
     pendingGeneration = null;
-    if (activeRun?.automatic) {
+    if (activeRun) {
         activeRun.cancelled = true;
         if (summaryRequest?.sending) {
             summaryRequest.cancelled = true;
@@ -344,13 +352,33 @@ function cancelPendingAutoSummary() {
     }
 }
 
+function stopPluginWork() {
+    cancelPendingAutoSummary();
+    chatSyncRevision += 1;
+    visibilityRefreshRevision += 1;
+    directoryRequest += 1;
+    if (visibilityRefreshTimer) clearTimeout(visibilityRefreshTimer);
+    visibilityRefreshTimer = null;
+    if (modelFetchTimer) clearTimeout(modelFetchTimer);
+    modelFetchTimer = null;
+    modelFetchRevision += 1;
+    modelFetchController?.abort();
+    modelFetchController = null;
+    const modelButton = ui?.querySelector('.als-model-fetch');
+    if (modelButton) modelButton.disabled = Boolean(sendLockDepth);
+    selectedSummary = null;
+    directoryData = null;
+    const tree = ui?.querySelector('.als-tree');
+    if (tree) tree.replaceChildren(createElement('p', 'als-muted', '插件已关闭喵，启用后再查看总结。'));
+}
+
 function applyEnabledState(value) {
     settings.enabled = Boolean(value);
     settingsDraft.enabled = settings.enabled;
     const revision = ++enabledRevision;
     if (!settings.enabled) {
-        cancelPendingAutoSummary();
-        setStatus('自动总结已关闭。');
+        stopPluginWork();
+        setStatus('插件已关闭，不再检查上下文或切换总结条目喵。');
     }
     syncSettingsState();
     // Serialize immediate saves so rapid on/off toggles cannot leave an older
@@ -363,7 +391,7 @@ function applyEnabledState(value) {
 function summaryWasCancelled() {
     return Boolean(activeRun && (activeRun.cancelled
         || activeRun.manualVisibilityRevision !== manualVisibilityRevision
-        || (activeRun.automatic && (!settings.enabled || activeRun.enabledRevision !== enabledRevision))));
+        || !settings.enabled || activeRun.enabledRevision !== enabledRevision));
 }
 
 function assertSummaryActive() {
@@ -481,6 +509,7 @@ async function prepareChatPreview(context, messages) {
 }
 
 function refreshFinalHooks() {
+    if (!settings?.enabled) return;
     const context = getContext();
     if (!context?.eventSource?.makeLast) return;
     context.eventSource.makeLast(context.eventTypes.GENERATE_AFTER_DATA, onFinalPromptData);
@@ -616,6 +645,7 @@ function buildSecondaryRequest(context, original, config) {
 }
 
 async function fetchSecondaryModels({ silent = false } = {}) {
+    if (silent && !settings?.enabled) return;
     if (sendLockDepth) return;
     let config;
     const label = ui.querySelector('.als-model-status');
@@ -667,20 +697,40 @@ async function fetchSecondaryModels({ silent = false } = {}) {
 }
 
 function renderModelOptions() {
-    const list = ui?.querySelector('.als-model-options');
+    const list = ui?.querySelector('.als-model-select');
     if (!list) return;
-    list.replaceChildren(...(settingsDraft.secondaryModels ?? []).map(model => {
-        const option = document.createElement('option');
-        option.value = model;
+    const models = settingsDraft.secondaryModels ?? [];
+    const placeholder = createElement('option', '', models.length ? '请选择模型' : '先拉取模型，或选择手动填写');
+    placeholder.value = '';
+    const manual = createElement('option', '', '手动填写模型名…');
+    manual.value = 'manual';
+    list.replaceChildren(placeholder, ...models.map((model, index) => {
+        const option = createElement('option', '', model);
+        option.value = String(index);
         return option;
-    }));
+    }), manual);
+    const selected = models.indexOf(settingsDraft.secondaryModel);
+    list.value = selected >= 0 ? String(selected) : settingsDraft.secondaryModel ? 'manual' : '';
+    ui.querySelector('.als-model-manual-field').hidden = list.value !== 'manual';
+}
+
+function selectSecondaryModel(value) {
+    if (sendLockDepth) return;
+    const manual = value === 'manual';
+    if (!manual) {
+        settingsDraft.secondaryModel = settingsDraft.secondaryModels?.[Number(value)] ?? '';
+        if (value === '') settingsDraft.secondaryModel = '';
+        ui.querySelector('.als-secondary-model').value = settingsDraft.secondaryModel;
+    }
+    ui.querySelector('.als-model-manual-field').hidden = !manual;
+    syncSettingsState();
 }
 
 function scheduleModelFetch() {
     if (modelFetchTimer) clearTimeout(modelFetchTimer);
     modelFetchTimer = setTimeout(() => {
         modelFetchTimer = null;
-        if (settingsDraft.apiMode === 'secondary' && settingsDraft.secondaryUrl.trim()) void fetchSecondaryModels({ silent: true });
+        if (settings.enabled && settingsDraft.apiMode === 'secondary' && settingsDraft.secondaryUrl.trim()) void fetchSecondaryModels({ silent: true });
     }, 400);
 }
 
@@ -1019,13 +1069,18 @@ async function ensureWorldBook(context = getContext()) {
 }
 
 async function prepareWorldBook(context, name, { create = true } = {}) {
+    if (!settings.enabled) return null;
+    const revision = enabledRevision;
     await context.updateWorldInfoList();
+    if (!settings.enabled || revision !== enabledRevision) return null;
     // /worldinfo/get returns an empty dummy book even when no file exists.
     // Only the refreshed file list can establish whether creation is needed.
     if (!context.getWorldInfoNames().includes(name)) {
         if (!create) return null;
         await context.saveWorldInfo(name, { entries: {} }, true);
+        if (!settings.enabled || revision !== enabledRevision) return null;
         await context.updateWorldInfoList();
+        if (!settings.enabled || revision !== enabledRevision) return null;
         if (!context.getWorldInfoNames().includes(name)) {
             throw new Error(`酒馆没有确认创建世界书“${name}”。请查看控制台或服务器日志后重试。`);
         }
@@ -1050,24 +1105,34 @@ async function updateWorldBookStatus() {
     const context = getContext();
     if (!context || !ui) return;
     const label = ui.querySelector('.als-book-status');
+    if (!settings.enabled) {
+        if (label) label.textContent = '插件已关闭喵';
+        return;
+    }
+    const revision = enabledRevision;
     try {
         await context.updateWorldInfoList();
+        if (!settings.enabled || revision !== enabledRevision) return;
         const exists = context.getWorldInfoNames().includes(settings.worldBookName);
         const mounted = [...document.querySelectorAll('#world_info option')]
             .some(option => option.textContent?.trim() === settings.worldBookName && option.selected);
         label.textContent = !exists ? '还没建好喵 · 首次总结会自动创建并全局启用'
             : mounted ? '世界书建好并全局启用啦喵' : '世界书建好啦喵 · 下次总结会自动全局启用';
     } catch (error) {
+        if (!settings.enabled || revision !== enabledRevision) return;
         label.textContent = meowText(`无法读取世界书状态：${error.message}`);
     }
 }
 
 async function activateWorldBook(context = getContext()) {
+    if (!settings.enabled) return;
+    const revision = enabledRevision;
     const name = settings.worldBookName;
     const findOption = () => [...document.querySelectorAll('#world_info option')]
         .find(item => item.textContent?.trim() === name);
 
     await context.updateWorldInfoList?.();
+    if (!settings.enabled || revision !== enabledRevision) return;
     let option = findOption();
     if (!option) throw new Error(`世界书“${name}”已保存，但未出现在全局世界书列表中。请刷新酒馆后重试。`);
     if (!option.selected) {
@@ -1085,10 +1150,12 @@ async function activateWorldBook(context = getContext()) {
 
 async function setArchiveActivation(archiveId, { reconcileCursor = false } = {}) {
     const context = getContext();
-    if (!context || !settings.worldBookName) return;
+    if (!settings.enabled || !context || !settings.worldBookName) return;
+    const revision = enabledRevision;
     const data = await ensureWorldBook(context);
     const identity = getCharacterAndChat(context);
     const stillCurrent = () => {
+        if (!settings.enabled || revision !== enabledRevision) return false;
         const live = getCharacterAndChat();
         return identity ? live?.cardKey === identity.cardKey && live?.chatId === identity.chatId
             && (getContext()?.chatMetadata?.[MODULE_NAME]?.archiveId ?? null) === (archiveId ?? null)
@@ -1158,7 +1225,7 @@ async function setArchiveActivation(archiveId, { reconcileCursor = false } = {})
 }
 
 function canSummarize(context = getContext(), automatic = false) {
-    return Boolean((!automatic || settings?.enabled) && getCharacterAndChat(context) && settings.prompt?.trim());
+    return Boolean(settings?.enabled && getCharacterAndChat(context) && settings.prompt?.trim());
 }
 
 function eligibleUncoveredRange(context, archiveInfo, manual) {
@@ -1209,6 +1276,7 @@ async function waitForCurrentGeneration(context, expectedChatId) {
 }
 
 async function runLargeSummary({ manual = false } = {}) {
+    if (!settings?.enabled) return false;
     if (runInProgress || (manual && thresholdCheckInProgress)) return false;
     const context = getContext();
     const current = getCharacterAndChat(context);
@@ -1418,6 +1486,7 @@ async function runLargeSummary({ manual = false } = {}) {
         activeRun.committed = true;
         showProgress('大总结保存成功，正在处理旧楼层…');
         await latestContext.updateWorldInfoList?.();
+        assertSummaryActive();
         latestContext.reloadWorldInfoEditor?.(settings.worldBookName);
 
         if (!isSameArchive(getContext(), archiveInfo, context.characterId)) {
@@ -1479,7 +1548,7 @@ async function runLargeSummary({ manual = false } = {}) {
             notify('error', failure, '喵喵大总结');
             setStatus(`${failure}。已解除发送锁。`);
         }
-        if (!summaryCommitted) {
+        if (!summaryCommitted && settings.enabled) {
             const live = getContext();
             const currentArchive = live?.chatMetadata?.[MODULE_NAME];
             if (currentArchive && live?.chatId === activeRun?.chatId
@@ -1498,6 +1567,7 @@ async function runLargeSummary({ manual = false } = {}) {
 }
 
 function onGenerationAfterCommands(type, _options, dryRun) {
+    if (!settings?.enabled) return;
     refreshFinalHooks();
     if (dryRun) return;
     if (summaryRequest?.afterCommands && type === 'quiet') {
@@ -1518,6 +1588,7 @@ function onGenerationAfterCommands(type, _options, dryRun) {
 }
 
 globalThis.meowLargeSummaryGenerationInterceptor = (_chat, _contextSize, abort, type) => {
+    if (!settings?.enabled) return;
     if (type === 'quiet' && summaryRequest?.interceptorPending && !summaryWasCancelled()) {
         summaryRequest.interceptorPending = false;
         return;
@@ -1545,6 +1616,7 @@ async function checkAfterReply(pending) {
         if (!archiveInfo || !stillEnabled()) return;
         const snapshot = captureMessageRange(context.chat, context.chat.length - 1);
         const data = await assemblePrompt(context);
+        if (!stillEnabled()) return;
         const count = await countAssembledPrompt(context, data);
         if (!Number.isFinite(count)) throw new Error('酒馆返回了无效的 token 数。');
         if (!stillEnabled() || !isSameArchive(getContext(), archiveInfo, context.characterId)
@@ -1641,9 +1713,13 @@ function onGenerationEnded() {
 
 async function syncCurrentArchive() {
     getSettings();
+    if (!settings.enabled) return;
+    const revision = enabledRevision;
+    const stillEnabled = () => settings.enabled && revision === enabledRevision;
     installVisibilityCommandHooks();
     const context = getContext();
     let archiveInfo = await ensureArchive(context);
+    if (!stillEnabled()) return;
     if (archiveInfo && settings.pendingRetries.includes(archiveInfo.archive.archiveId)) {
         archiveInfo.archive.autoTriggerArmed = true;
         settings.pendingRetries = settings.pendingRetries.filter(id => id !== archiveInfo.archive.archiveId);
@@ -1651,6 +1727,7 @@ async function syncCurrentArchive() {
         saveSettings();
     }
     const existing = await prepareWorldBook(context, settings.worldBookName, { create: false });
+    if (!stillEnabled()) return;
     const matchingEntry = existing && archiveInfo && listOwnedEntries(existing)
         .find(entry => entryMetadata(entry)?.archiveId === archiveInfo.archive.archiveId);
     if (matchingEntry && entryMetadata(matchingEntry)?.cardKey !== archiveInfo.cardKey
@@ -1659,36 +1736,40 @@ async function syncCurrentArchive() {
         delete archiveInfo.archive.archiveId;
         archiveInfo = await ensureArchive(context);
     }
-    if (existing) await setArchiveActivation(archiveInfo?.archive.archiveId ?? null, { reconcileCursor: true });
+    if (existing && stillEnabled()) await setArchiveActivation(archiveInfo?.archive.archiveId ?? null, { reconcileCursor: true });
+    if (!stillEnabled()) return;
     void updateWorldBookStatus();
     if (currentTab === 'directory') void renderDirectory();
 }
 
 function scheduleChatSync({ checkThreshold = true } = {}) {
+    if (!settings?.enabled) return Promise.resolve();
     const revision = ++chatSyncRevision;
+    const startEnabledRevision = enabledRevision;
+    const stillEnabled = () => settings.enabled && startEnabledRevision === enabledRevision && revision === chatSyncRevision;
     const startVisibilityRevision = manualVisibilityRevision;
     lockSending();
     setStatus('正在切换总结条目并检查当前存档…');
     const operation = chatSyncChain.catch(() => {}).then(async () => {
-        if (revision !== chatSyncRevision) return;
+        if (!stillEnabled()) return;
         // An earlier archive may still be finishing a cancelled request. Its
         // final write must finish before the new archive becomes active.
         while (runInProgress || thresholdCheckInProgress || promptProbe || archiveEditInProgress) {
             await new Promise(resolve => setTimeout(resolve, 80));
-            if (revision !== chatSyncRevision) return;
+            if (!stillEnabled()) return;
         }
         await syncCurrentArchive();
-        if (revision !== chatSyncRevision) return;
+        if (!stillEnabled()) return;
         const context = getContext();
         const current = getCharacterAndChat(context);
         if (checkThreshold && manualVisibilityRevision === startVisibilityRevision && current && canSummarize(context, true)) {
             await checkAfterReply({ chatId: current.chatId, characterId: context.characterId, onOpen: true, locked: false });
         } else {
-            setStatus(current ? `总结条目已同步。${settings.enabled ? '' : '自动总结未启用。'}` : '请选择角色卡的聊天存档。');
+            setStatus(current ? '总结条目已同步。' : '请选择角色卡的聊天存档。');
         }
     });
     chatSyncChain = operation.catch(error => {
-        if (revision === chatSyncRevision) {
+        if (stillEnabled()) {
             console.error('[喵喵大总结] 存档同步失败：', error);
             setStatus(`存档同步失败：${error.message}`);
             notify('error', `大总结存档同步失败：${error.message}`);
@@ -1714,6 +1795,7 @@ function summaryRows(data) {
 }
 
 function showSummary(entry) {
+    if (!settings.enabled) return;
     const meta = entryMetadata(entry);
     selectedSummary = { archiveId: meta.archiveId, uid: entry.uid, bookName: settings.worldBookName };
     ui.querySelector('.als-preview-title').textContent = `${meta.characterName} / ${meta.chatName}`;
@@ -1735,7 +1817,7 @@ function showSummary(entry) {
 }
 
 async function deleteSummarySelection({ roundOnly = false } = {}) {
-    if (sendLockDepth || !selectedSummary || selectedSummary.bookName !== settings.worldBookName) return;
+    if (!settings.enabled || sendLockDepth || !selectedSummary || selectedSummary.bookName !== settings.worldBookName) return;
     const selection = { ...selectedSummary };
     const selectedRound = ui.querySelector('.als-history-select').value;
     archiveEditInProgress = true;
@@ -1743,6 +1825,7 @@ async function deleteSummarySelection({ roundOnly = false } = {}) {
     try {
         const context = getContext();
         const data = await prepareWorldBook(context, selection.bookName, { create: false });
+        if (!settings.enabled) return;
         const entry = data?.entries?.[selection.uid];
         if (!entry || entryMetadata(entry)?.archiveId !== selection.archiveId) return;
         const meta = entryMetadata(entry);
@@ -1796,18 +1879,18 @@ async function deleteSummarySelection({ roundOnly = false } = {}) {
 }
 
 async function renderDirectory({ reload = true } = {}) {
-    if (!ui || !settings) return;
+    if (!ui || !settings?.enabled) return;
     const request = ++directoryRequest;
     const bookName = settings.worldBookName;
     const tree = ui.querySelector('.als-tree');
     if (reload || !directoryData || directoryBookName !== bookName) {
         try {
             const data = await prepareWorldBook(getContext(), bookName, { create: false });
-            if (request !== directoryRequest || bookName !== settings.worldBookName) return;
+            if (!settings.enabled || request !== directoryRequest || bookName !== settings.worldBookName) return;
             directoryData = data ?? { entries: {} };
             directoryBookName = bookName;
         } catch (error) {
-            if (request !== directoryRequest) return;
+            if (!settings.enabled || request !== directoryRequest) return;
             tree.replaceChildren(createElement('p', 'als-muted', error.message));
             return;
         }
@@ -1957,6 +2040,24 @@ function syncSettingsState() {
     ui.querySelector('.als-instruction-role-field').hidden = settingsDraft.instructionPosition === 'tail';
     const secondary = ui.querySelector('.als-secondary-settings');
     if (secondary) secondary.hidden = settingsDraft.apiMode !== 'secondary';
+    syncOperationalControls();
+}
+
+function syncOperationalControls() {
+    if (!ui || !settings) return;
+    for (const selector of ['.als-run', '.als-book-check', '.als-directory-refresh', '.als-delete-round', '.als-delete-archive', '.als-directory-search', '.als-card-filter', '.als-page-prev', '.als-page-next']) {
+        for (const control of ui.querySelectorAll(selector)) {
+            // Preserve pagination/selection restrictions when enabled.
+            if (!settings.enabled) control.disabled = true;
+            else if (!sendLockDepth && !['.als-delete-round', '.als-page-prev', '.als-page-next'].includes(selector)) control.disabled = false;
+        }
+    }
+    if (!settings.enabled) {
+        const label = ui.querySelector('.als-book-status');
+        if (label) label.textContent = '插件已关闭喵';
+        const preview = ui.querySelector('.als-preview-box');
+        if (preview) preview.hidden = true;
+    }
 }
 
 function populateSettingsDraft() {
@@ -2002,8 +2103,9 @@ async function saveSettingsDraft() {
     const saveEnabledRevision = enabledRevision;
     try {
         const context = getContext();
-        if (name !== settings.worldBookName) {
+        if (settings.enabled && settingsDraft.enabled && name !== settings.worldBookName) {
             const previous = await prepareWorldBook(context, settings.worldBookName, { create: false });
+            if (!settings.enabled || enabledRevision !== saveEnabledRevision) return;
             const owned = listOwnedEntries(previous);
             if (owned.some(entry => !entry.disable)) {
                 for (const entry of owned) { entry.disable = true; entry.constant = false; }
@@ -2018,7 +2120,7 @@ async function saveSettingsDraft() {
         Object.assign(settings, settingsDraft);
         if (enabledChanged) {
             enabledRevision += 1;
-            if (!settings.enabled) cancelPendingAutoSummary();
+            if (!settings.enabled) stopPluginWork();
         }
         settings.prompt = settings.prompts[settings.mode];
         await persistSettingsNow();
@@ -2072,7 +2174,10 @@ function renderUpdateNotice() {
 }
 
 async function checkForUpdate({ silent = false } = {}) {
+    if (silent && !settings?.enabled) return;
     if (updateCheckInProgress || updateInProgress) return;
+    const revision = enabledRevision;
+    const cancelled = () => silent && (!settings.enabled || revision !== enabledRevision);
     updateCheckInProgress = true;
     const label = ui.querySelector('.als-update-status');
     const button = ui.querySelector('.als-update-check');
@@ -2080,7 +2185,9 @@ async function checkForUpdate({ silent = false } = {}) {
     label.textContent = '喵喵正在看看有没有更新…';
     try {
         const installation = await getInstalledExtension();
+        if (cancelled()) return;
         const version = await extensionApi('version', installation);
+        if (cancelled()) return;
         if (typeof version.isUpToDate !== 'boolean') throw new Error('酒馆未返回有效的更新状态。');
         availableUpdate = null;
         if (!version.isUpToDate) {
@@ -2097,16 +2204,19 @@ async function checkForUpdate({ silent = false } = {}) {
                     }
                 } catch { /* The ST Git check remains authoritative if version labels cannot be read. */ }
             }
+            if (cancelled()) return;
             availableUpdate = { installation, version: remoteVersion, key: `${remoteVersion}:${version.currentCommitHash}` };
             label.textContent = `新版本到啦喵：${remoteVersion}`;
         } else label.textContent = `当前 v${EXTENSION_VERSION}，已经是最新版本喵`;
         renderUpdateNotice();
     } catch (error) {
+        if (cancelled()) return;
         label.textContent = error.message;
         if (!silent) notify('warning', error.message);
     } finally {
         updateCheckInProgress = false;
         button.disabled = false;
+        if (cancelled()) label.textContent = '插件已关闭喵，可手动检查更新。';
     }
 }
 
@@ -2186,9 +2296,9 @@ async function renderSettings() {
             <button type="button" class="als-update-dismiss" aria-label="关闭更新提示">×</button>
           </div>
           <div class="als-tabs" role="tablist" aria-label="喵喵大总结">
-            <button type="button" class="als-tab als-tab-active" id="als-tab-settings" data-tab="settings" role="tab" aria-selected="true" aria-controls="als-panel-settings">喵喵设置</button>
+            <button type="button" class="als-tab als-tab-active" id="als-tab-settings" data-tab="settings" role="tab" aria-selected="true" aria-controls="als-panel-settings">设置</button>
             <button type="button" class="als-tab" id="als-tab-prompt" data-tab="prompt" role="tab" aria-selected="false" aria-controls="als-panel-prompt" tabindex="-1">提示词</button>
-            <button type="button" class="als-tab" id="als-tab-directory" data-tab="directory" role="tab" aria-selected="false" aria-controls="als-panel-directory" tabindex="-1">总结小窝</button>
+            <button type="button" class="als-tab" id="als-tab-directory" data-tab="directory" role="tab" aria-selected="false" aria-controls="als-panel-directory" tabindex="-1">总结</button>
           </div>
           <div class="als-status" role="status" aria-live="polite">打开存档、普通回复结束后，喵喵会检查实际 token。</div>
           <div class="als-panel" id="als-panel-settings" data-panel="settings" role="tabpanel" aria-labelledby="als-tab-settings">
@@ -2208,7 +2318,8 @@ async function renderSettings() {
               <label class="als-field">副 API 基础 URL<input class="text_pole als-secondary-url" type="url" placeholder="https://api.example.com/v1" autocomplete="off" spellcheck="false"></label>
               <label class="als-field">副 API Key（无密钥服务可留空）<input class="text_pole als-secondary-key" type="password" autocomplete="new-password" spellcheck="false"></label>
               <div class="als-model-state"><small class="als-model-status als-muted" role="status">填好 URL 和 Key 后，喵喵会帮你拉取模型。</small><button type="button" class="menu_button als-model-fetch">拉取模型</button></div>
-              <label class="als-field">副 API 模型<input class="text_pole als-secondary-model" type="text" list="als-secondary-model-options" placeholder="从列表选择，也可以手填模型名" autocomplete="off" spellcheck="false"><datalist class="als-model-options" id="als-secondary-model-options"></datalist></label>
+              <label class="als-field">副 API 模型<select class="text_pole als-model-select" aria-label="选择副 API 模型"></select></label>
+              <label class="als-field als-model-manual-field" hidden>手动填写模型名<input class="text_pole als-secondary-model" type="text" placeholder="输入完整模型 ID" autocomplete="off" spellcheck="false"></label>
               <small class="als-muted">选好模型后和其他设置一起保存喵。采样与输出长度沿用当前生成参数。</small>
             </div>
             <label class="als-field">总结模式
@@ -2253,7 +2364,7 @@ async function renderSettings() {
               <button type="button" class="menu_button als-prompt-reset">回到默认提示词</button>
             </div>
             <small class="als-prompt-state als-muted" role="status">提示词已经记住喵。</small>
-            <small class="als-muted">两种模式的提示词分开记住喵。这里选要编辑的模板；实际总结模式在“喵喵设置”里保存。点击保存后，刷新和重启都不会丢；回到默认只改编辑框，还要保存才生效。</small>
+            <small class="als-muted">两种模式的提示词分开记住喵。这里选要编辑的模板；实际总结模式在“设置”里保存。点击保存后，刷新和重启都不会丢；回到默认只改编辑框，还要保存才生效。</small>
           </div>
           <div class="als-panel" id="als-panel-directory" data-panel="directory" role="tabpanel" aria-labelledby="als-tab-directory" hidden>
             <div class="als-directory-tools">
@@ -2289,6 +2400,7 @@ async function renderSettings() {
     bindInput('.als-secondary-url', 'secondaryUrl', value => String(value).trim());
     bindInput('.als-secondary-key', 'secondaryKey', String);
     bindInput('.als-secondary-model', 'secondaryModel', value => String(value).trim());
+    ui.querySelector('.als-model-select').addEventListener('change', event => selectSecondaryModel(event.target.value));
     ui.querySelector('.als-model-fetch').addEventListener('click', () => void fetchSecondaryModels());
     ui.querySelector('.als-api-mode').addEventListener('change', () => {
         if (settingsDraft.apiMode === 'secondary' && !settingsDraft.secondaryModels.length) scheduleModelFetch();
@@ -2374,7 +2486,8 @@ async function renderSettings() {
     ui.querySelector('.als-delete-round').addEventListener('click', () => void deleteSummarySelection({ roundOnly: true }).catch(error => notify('error', error.message)));
     ui.querySelector('.als-preview-box .als-delete-archive').addEventListener('click', () => void deleteSummarySelection().catch(error => notify('error', error.message)));
     void updateWorldBookStatus();
-    void checkForUpdate({ silent: true });
+    if (settings.enabled) void checkForUpdate({ silent: true });
+    else setStatus('插件已关闭，不再检查上下文或切换总结条目喵。');
 }
 
 function initialize() {
@@ -2395,6 +2508,7 @@ function initialize() {
     context.eventSource.on(context.eventTypes.MESSAGE_RECEIVED, onMessageReceived);
     context.eventSource.on(context.eventTypes.GENERATION_ENDED, onGenerationEnded);
     context.eventSource.on(context.eventTypes.CHAT_CHANGED, () => {
+        if (!settings.enabled) return;
         if (activeRun && !activeRun.committed) queueArchiveRetry(activeRun.archiveId);
         if (activeRun) activeRun.cancelled = true;
         if (summaryRequest?.sending) getContext()?.stopGeneration?.();
