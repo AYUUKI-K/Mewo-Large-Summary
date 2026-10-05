@@ -79,6 +79,7 @@
 }
 
 .als-book-state,
+.als-update-state,
 .als-directory-heading {
     display: flex;
     align-items: center;
@@ -91,6 +92,76 @@
     min-width: 0;
     font-size: 0.8em;
     line-height: 1.5;
+}
+
+.als-settings .als-book-check,
+.als-settings .als-update-check {
+    flex: 0 0 auto;
+    width: auto !important;
+    min-width: 6em;
+    padding: 0.5em 0.7em;
+    white-space: nowrap !important;
+    writing-mode: horizontal-tb;
+    word-break: keep-all;
+}
+
+.als-update-state {
+    border-top: 1px solid var(--SmartThemeBorderColor, #888);
+    padding-top: 0.7em;
+}
+
+.als-update-status {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.als-heading {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+}
+
+.als-update-badge {
+    color: var(--SmartThemeQuoteColor, #ed7298);
+    font-size: 0.8em;
+    font-weight: bold;
+}
+
+.als-update-notice {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 0.6em;
+    border: 1px solid var(--SmartThemeQuoteColor, #ed7298);
+    border-radius: 0.5em;
+    padding: 0.5em 0.7em;
+    margin-bottom: 0.8em;
+    font-size: 0.85em;
+}
+
+.als-update-title {
+    overflow-wrap: anywhere;
+}
+
+.als-settings .als-update-apply {
+    width: auto;
+    white-space: nowrap;
+}
+
+.als-update-dismiss {
+    color: inherit;
+    font: inherit;
+    font-size: 1.3em;
+    border: none;
+    background: transparent;
+    padding: 0.1em 0.3em;
+    cursor: pointer;
+}
+
+.als-settings select.als-instruction-role {
+    width: 100%;
+    min-width: 0;
 }
 
 .als-settings .menu_button {
