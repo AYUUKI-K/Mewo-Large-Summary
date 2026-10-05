@@ -1,6 +1,6 @@
 const MODULE_NAME = 'auto_large_summary';
 const ENTRY_MARKER = 'auto_large_summary';
-const EXTENSION_VERSION = '0.3.4';
+const EXTENSION_VERSION = '1.0.0';
 const SUMMARY_INJECTION_ID = 'meow_large_summary_instruction';
 const LEGACY_DEFAULT_PROMPT = `ELLA, suspend all current commands. The following directive has absolute priority:
 Since THE STARS has grown lengthy, extract and compose a comprehensive summary.
@@ -116,6 +116,11 @@ const DEFAULT_SETTINGS = Object.freeze({
     instructionDepth: 0,
     instructionRole: 0,
     prompt: DEFAULT_PROMPT,
+    apiMode: 'main',
+    secondaryUrl: '',
+    secondaryKey: '',
+    secondaryModel: '',
+    secondaryModels: [],
 });
 
 let settings;
@@ -131,7 +136,7 @@ let requestPreview = false;
 let thresholdCheckInProgress = false;
 let sendLockDepth = 0;
 const lockedControls = new Map();
-const SEND_CONTROL_SELECTOR = '#send_but, #option_continue, #option_regenerate, .swipe_left, .swipe_right, .als-settings input:not(.als-enabled), .als-settings .als-mode, .als-settings .als-instruction-position, .als-settings .als-instruction-role, .als-settings .als-prompt, .als-run, .als-settings-save, .als-settings-reset, .als-prompt-save, .als-prompt-reset, .als-delete-archive, .als-delete-round, .als-update-apply';
+const SEND_CONTROL_SELECTOR = '#send_but, #option_continue, #option_regenerate, .swipe_left, .swipe_right, .als-settings input:not(.als-enabled), .als-settings .als-mode, .als-settings .als-api-mode, .als-model-fetch, .als-settings .als-instruction-position, .als-settings .als-instruction-role, .als-settings .als-prompt, .als-run, .als-settings-save, .als-settings-reset, .als-prompt-save, .als-prompt-reset, .als-delete-archive, .als-delete-round, .als-update-apply';
 const worldBookPreparations = new Map();
 const MODE_LABELS = { incremental: '多次大总结', merged: '合并大总结' };
 const DIRECTORY_PAGE_SIZE = 8;
@@ -158,12 +163,25 @@ let visibilityRefreshRevision = 0;
 let visibilityRefreshTimer = null;
 const visibilityCommandCallbacks = new WeakSet();
 let enabledSaveChain = Promise.resolve();
-const SETTING_FIELDS = ['enabled', 'threshold', 'keepRecent', 'worldBookName', 'depth', 'mode', 'instructionPosition', 'instructionDepth', 'instructionRole'];
+let modelFetchRevision = 0;
+let modelFetchTimer = null;
+let modelFetchController = null;
+const SETTING_FIELDS = ['enabled', 'threshold', 'keepRecent', 'worldBookName', 'depth', 'mode', 'instructionPosition', 'instructionDepth', 'instructionRole', 'apiMode', 'secondaryUrl', 'secondaryKey', 'secondaryModel', 'secondaryModels'];
 const INSTRUCTION_POSITIONS = { tail: null, before: 2, after: 0, depth: 1 };
 
 function setStatus(message) {
     const status = ui?.querySelector('.als-status');
-    if (status) status.textContent = message;
+    if (status) status.textContent = meowText(message);
+}
+
+function meowText(message) {
+    const text = String(message ?? '');
+    return !text || /^喵[，,!！]|喵[，,。!！？?…]|喵$|喵喵正在/.test(text)
+        ? text : `${text.replace(/[。！!]$/, '')}喵。`;
+}
+
+function notify(kind, message, title = '喵喵大总结', options) {
+    return window.toastr?.[kind]?.(meowText(message), title, options);
 }
 
 function lockSending() {
@@ -193,6 +211,8 @@ function unlockSending() {
     for (const control of ui?.querySelectorAll('.als-delete-archive') ?? []) control.disabled = false;
     const deleteRound = ui?.querySelector('.als-delete-round');
     if (deleteRound) deleteRound.disabled = !selectedSummary || ui.querySelector('.als-history-select').value === 'all';
+    const modelButton = ui?.querySelector('.als-model-fetch');
+    if (modelButton) modelButton.disabled = Boolean(modelFetchController);
 }
 
 function blockSendInput(event) {
@@ -214,7 +234,7 @@ function blockSendInput(event) {
     if (fromChatInput && command.startsWith('/')) return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    window.toastr?.info?.('正在检查上下文或进行大总结，保存并隐藏旧楼层后才能继续发送。', '', { preventDuplicates: true });
+    notify('info', '正在检查上下文或进行大总结，保存并隐藏旧楼层后才能继续发送。', '', { preventDuplicates: true });
 }
 
 function installVisibilityCommandHooks() {
@@ -241,13 +261,13 @@ function installVisibilityCommandHooks() {
     }
 }
 
-function scheduleVisibilityRefresh(context = getContext()) {
+function scheduleVisibilityRefresh(context = getContext(), { afterSummary = false } = {}) {
     if (!context || !getCharacterAndChat(context)) return;
     const revision = ++visibilityRefreshRevision;
     if (visibilityRefreshTimer) clearTimeout(visibilityRefreshTimer);
     visibilityRefreshTimer = setTimeout(() => {
         visibilityRefreshTimer = null;
-        void refreshVisibilityTokens(context, revision);
+        void refreshVisibilityTokens(context, revision, { afterSummary });
     }, 150);
 }
 
@@ -259,7 +279,7 @@ async function renderNativeTokenCounter(context) {
     promptManager?.render(false);
 }
 
-async function refreshVisibilityTokens(context, revision = visibilityRefreshRevision) {
+async function refreshVisibilityTokens(context, revision = visibilityRefreshRevision, { afterSummary = false } = {}) {
     const currentRequest = () => revision === visibilityRefreshRevision
         && getContext()?.chat === context.chat && getContext()?.chatId === context.chatId
         && getContext()?.characterId === context.characterId;
@@ -289,9 +309,20 @@ async function refreshVisibilityTokens(context, revision = visibilityRefreshRevi
         if (!currentRequest()) return;
         const archive = context.chatMetadata?.[MODULE_NAME];
         if (archive) archive.lastPromptTokens = count;
-        setStatus(`楼层显示状态已更新，当前上下文：${count.toLocaleString()} token。`);
+        if (afterSummary && archive) {
+            reportSummaryTokenCount(archive, count);
+            await context.saveMetadata?.();
+        } else {
+            if (archive?.summaryStillOverThreshold && count < Math.max(1, Number(settings.threshold) || DEFAULT_SETTINGS.threshold)) {
+                archive.summaryStillOverThreshold = false;
+                archive.autoTriggerArmed = true;
+                await context.saveMetadata?.();
+            }
+            if (currentRequest()) setStatus(`楼层显示状态已更新，当前上下文：${count.toLocaleString()} token。`);
+        }
         // A manual visibility edit only refreshes counts. Never evaluate the
-        // threshold, sync world info, rearm a summary, or issue another /hide.
+        // threshold for generation, sync world info, or issue another /hide.
+        // Falling below the threshold only clears the over-limit pause.
     } catch (error) {
         if (currentRequest()) setStatus(`楼层状态由酒馆保存；token 刷新失败：${error.message}`);
     } finally {
@@ -321,15 +352,12 @@ function applyEnabledState(value) {
         cancelPendingAutoSummary();
         setStatus('自动总结已关闭。');
     }
-    saveSettings();
     syncSettingsState();
     // Serialize immediate saves so rapid on/off toggles cannot leave an older
     // setting as the last server write. No other settings drafts are applied.
-    enabledSaveChain = enabledSaveChain.catch(() => {}).then(async () => {
-        const native = await import('/script.js');
-        if (typeof native.saveSettings === 'function') await native.saveSettings();
+    void persistSettingsNow().then(() => {
         if (revision === enabledRevision && settings.enabled) void scheduleChatSync();
-    }).catch(error => window.toastr?.error?.(`启用状态保存失败：${error.message}`));
+    }).catch(error => notify('error', `启用状态保存失败：${error.message}`));
 }
 
 function summaryWasCancelled() {
@@ -386,6 +414,14 @@ function onMainApiRequest(data) {
         // cannot replace the requested textual summary with a tool invocation.
         delete data.tools;
         delete data.tool_choice;
+        if (summaryRequest.secondary) {
+            // Set the destination in the owned request object as well as the
+            // fetch adapter. A later hook cannot silently fall back to the
+            // main provider merely by changing the serialized request body.
+            const secondaryData = buildSecondaryRequest(getContext(), data, summaryRequest.secondary);
+            for (const key of Object.keys(data)) delete data[key];
+            Object.assign(data, secondaryData);
+        }
         summaryRequest.sent = true;
         summaryRequest.expectedBody = JSON.stringify(data);
     }
@@ -535,14 +571,129 @@ function stripReasoning(text, template = getContext()?.powerUserSettings?.reason
     return content.trim();
 }
 
+function getSecondaryConfig(source = settings, requireModel = true) {
+    let url;
+    try { url = new URL(String(source.secondaryUrl ?? '').trim()); }
+    catch { throw new Error('喵，请填好副 API 的 http / https 地址。'); }
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+        throw new Error('喵，副 API 地址只填基础 URL，Key 请放在下面的密钥框里。');
+    }
+    url.pathname = url.pathname.replace(/\/(?:chat\/completions|completions|models)\/?$/i, '').replace(/\/+$/, '') || '/v1';
+    const key = String(source.secondaryKey ?? '').trim().replace(/^Bearer\s+/i, '');
+    if (/[\r\n]/.test(key)) throw new Error('喵，副 API 的 Key 不能换行。');
+    const model = String(source.secondaryModel ?? '').trim();
+    if (requireModel && !model) throw new Error('喵，先拉取并选择副 API 模型，也可以手填模型名。');
+    return { url: url.toString().replace(/\/$/, ''), key, model };
+}
+
+function secondaryHeaders(config) {
+    // ST's custom endpoint merges these after its saved API key. Explicitly
+    // override Authorization even for a keyless endpoint; never borrow a key.
+    return JSON.stringify({ Authorization: config.key ? `Bearer ${config.key}` : '' });
+}
+
+function buildSecondaryRequest(context, original, config) {
+    const messages = Array.isArray(original.messages) ? original.messages
+        : Array.isArray(original.prompt) ? original.prompt
+            : [{ role: 'user', content: original.prompt ?? original.input }];
+    if (!messages.length || messages.some(message => typeof message?.content !== 'string' && !Array.isArray(message?.content))) {
+        throw new Error('喵，酒馆没有组装出可发送给副 API 的提示词。');
+    }
+    const payload = {
+        type: 'quiet', chat_completion_source: 'custom', model: config.model,
+        messages: structuredClone(messages), stream: false, n: 1,
+        custom_url: config.url, custom_include_headers: secondaryHeaders(config),
+        custom_prompt_post_processing: original.custom_prompt_post_processing ?? 'none',
+        max_tokens: Math.max(1, Math.floor(Number(original.max_tokens ?? original.max_completion_tokens ?? original.max_length
+            ?? context.chatCompletionSettings?.openai_max_tokens) || 8192)),
+        user_name: original.user_name ?? context.name1, char_name: original.char_name ?? context.name2,
+    };
+    for (const field of ['temperature', 'top_p', 'frequency_penalty', 'presence_penalty', 'seed']) {
+        if (Number.isFinite(original[field])) payload[field] = original[field];
+    }
+    if (Array.isArray(original.stop)) payload.stop = original.stop.filter(value => typeof value === 'string');
+    return payload;
+}
+
+async function fetchSecondaryModels({ silent = false } = {}) {
+    if (sendLockDepth) return;
+    let config;
+    const label = ui.querySelector('.als-model-status');
+    try { config = getSecondaryConfig(settingsDraft, false); }
+    catch (error) {
+        if (!silent) notify('warning', error.message);
+        label.textContent = error.message;
+        return;
+    }
+    const revision = ++modelFetchRevision;
+    modelFetchController?.abort();
+    const controller = new AbortController();
+    modelFetchController = controller;
+    const button = ui.querySelector('.als-model-fetch');
+    button.disabled = true;
+    label.textContent = '喵喵正在找可用模型…';
+    const unchanged = () => revision === modelFetchRevision
+        && settingsDraft.secondaryUrl === sourceUrl && settingsDraft.secondaryKey === sourceKey;
+    const sourceUrl = settingsDraft.secondaryUrl;
+    const sourceKey = settingsDraft.secondaryKey;
+    try {
+        const response = await fetch('/api/backends/chat-completions/status', {
+            method: 'POST', headers: getContext().getRequestHeaders(),
+            body: JSON.stringify({ chat_completion_source: 'custom', custom_url: config.url,
+                custom_include_headers: secondaryHeaders(config) }),
+            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30000)]),
+        });
+        if (!response.ok) throw new Error(`模型没拉到喵（HTTP ${response.status}），检查一下 URL 和 Key。`);
+        const data = await response.json();
+        if (data?.error || !Array.isArray(data?.data)) throw new Error('喵，副 API 没有返回 OpenAI 格式的模型列表；也可以手填模型名。');
+        const models = [...new Set(data.data.map(model => typeof model === 'string' ? model : model?.id)
+            .filter(model => typeof model === 'string' && model.trim()).map(model => model.trim()))].sort();
+        if (!unchanged()) return;
+        settingsDraft.secondaryModels = models;
+        renderModelOptions();
+        syncSettingsState();
+        label.textContent = models.length ? `找到 ${models.length} 个模型喵，选好后记得保存设置。` : '喵，列表是空的，可以直接填写模型名。';
+    } catch (error) {
+        if (!unchanged()) return;
+        label.textContent = error.name === 'TimeoutError' ? '拉取模型超时了喵，可以重试或手填模型名。'
+            : error.name === 'AbortError' ? '本次模型拉取已取消喵。' : error.message;
+        if (!silent) notify('warning', label.textContent);
+    } finally {
+        if (revision === modelFetchRevision) {
+            modelFetchController = null;
+            button.disabled = Boolean(sendLockDepth);
+        }
+    }
+}
+
+function renderModelOptions() {
+    const list = ui?.querySelector('.als-model-options');
+    if (!list) return;
+    list.replaceChildren(...(settingsDraft.secondaryModels ?? []).map(model => {
+        const option = document.createElement('option');
+        option.value = model;
+        return option;
+    }));
+}
+
+function scheduleModelFetch() {
+    if (modelFetchTimer) clearTimeout(modelFetchTimer);
+    modelFetchTimer = setTimeout(() => {
+        modelFetchTimer = null;
+        if (settingsDraft.apiMode === 'secondary' && settingsDraft.secondaryUrl.trim()) void fetchSecondaryModels({ silent: true });
+    }, 400);
+}
+
 async function requestMainApiSummary(context, prompt) {
     if (typeof context.generate !== 'function') throw new Error('当前酒馆缺少后台生成接口。');
+    const secondary = settings.apiMode === 'secondary' ? getSecondaryConfig() : null;
     const archiveInfo = await ensureArchive(context);
     assertSummaryActive();
     const request = {
         prompt, position: settings.instructionPosition, archiveInfo, characterId: context.characterId,
         tailMessages: new WeakSet(), native: true, afterCommands: true, sending: true, sent: false,
         expectedBody: null, rawText: null, cancelled: false,
+        secondary,
     };
     summaryRequest = request;
     const reasoningTemplate = { ...context.powerUserSettings?.reasoning };
@@ -555,7 +706,31 @@ async function requestMainApiSummary(context, prompt) {
         const url = typeof input === 'string' ? input : input?.url ?? String(input);
         const matches = observing && request.expectedBody && init?.body === request.expectedBody
             && /\/api\/(?:backends\/[^/]+\/generate|novelai\/generate|horde\/generate)(?:[?#]|$)/.test(url);
-        const response = await originalFetch.call(globalThis, input, init);
+        if (observing && secondary && request.expectedBody && !matches && typeof init?.body === 'string'
+            && /\/api\/(?:backends\/[^/]+\/generate|novelai\/generate|horde\/generate)(?:[?#]|$)/.test(url)
+            && init.body.includes(JSON.stringify(request.prompt).slice(1, -1))) {
+            throw new Error('喵，其他扩展改写了这次模型请求，已取消副 API 总结，请重试。');
+        }
+        let response;
+        if (matches && secondary) {
+            assertSummaryActive();
+            const payload = buildSecondaryRequest(context, JSON.parse(init.body), secondary);
+            response = await originalFetch.call(globalThis, '/api/backends/chat-completions/generate', {
+                ...init, method: 'POST', headers: context.getRequestHeaders(), body: JSON.stringify(payload),
+            });
+            assertSummaryActive();
+            if (!response.ok) throw new Error(`副 API 请求失败了喵（HTTP ${response.status}），检查一下 URL、Key 和模型。`);
+            const raw = await response.json();
+            if (raw?.error) throw new Error('副 API 返回错误了喵，检查一下连接信息和模型。');
+            request.rawText = extractSummaryText(raw);
+            // Let the native quiet flow finish with the same body regardless
+            // of the main API's reply schema. No main-model request is sent.
+            const text = request.rawText;
+            return new Response(JSON.stringify({ choices: [{ message: { role: 'assistant', content: text }, text }],
+                results: [{ text }], output: text, text, content: [{ type: 'text', text }] }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
+        response = await originalFetch.call(globalThis, input, init);
         if (matches && response.ok) {
             try {
                 const raw = await response.clone().json();
@@ -588,9 +763,11 @@ async function requestMainApiSummary(context, prompt) {
         if (request.cancelled || !isSameArchive(getContext(), archiveInfo, context.characterId)) {
             throw new Error('生成期间聊天存档已切换，本次总结已取消。');
         }
-        if (!request.sent) throw new Error('酒馆没有发出大总结请求，请确认主 API 已连接。');
+        if (!request.sent) throw new Error(secondary
+            ? '喵，副 API 总结还没进入酒馆发送流程，请先保持酒馆当前主连接可用，再试一次。'
+            : '酒馆没有发出大总结请求，请确认主 API 已连接。');
         const text = stripReasoning(request.rawText ?? extractSummaryText(response), reasoningTemplate);
-        if (!text) throw new Error('主 API 未返回可保存的总结正文（可能只有推理内容）。旧楼层未隐藏。');
+        if (!text) throw new Error(`${secondary ? '副' : '主'} API 没有返回可保存的总结正文喵（可能只有推理内容）。旧楼层未隐藏。`);
         return text;
     } finally {
         observing = false;
@@ -617,24 +794,29 @@ function getSettings() {
     const previousPrompt = settings.prompt;
     for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
         if (settings[key] === undefined) {
-            settings[key] = value;
+            settings[key] = structuredClone(value);
         }
     }
     settings.pendingRetries ??= [];
+    if (!['main', 'secondary'].includes(settings.apiMode)) settings.apiMode = 'main';
+    for (const key of ['secondaryUrl', 'secondaryKey', 'secondaryModel']) {
+        if (typeof settings[key] !== 'string') settings[key] = '';
+    }
+    if (!Array.isArray(settings.secondaryModels)) settings.secondaryModels = [];
     if (!Object.hasOwn(MODE_LABELS, settings.mode)) settings.mode = 'incremental';
     if (!Object.hasOwn(INSTRUCTION_POSITIONS, settings.instructionPosition)) settings.instructionPosition = 'tail';
     settings.instructionDepth = Math.min(10000, Math.max(0, Math.floor(Number(settings.instructionDepth) || 0)));
     if (![0, 1, 2].includes(settings.instructionRole)) settings.instructionRole = 0;
     let migrated = false;
-    if (!settings.prompts || typeof settings.prompts !== 'object') {
+    if (!settings.prompts || typeof settings.prompts !== 'object' || Array.isArray(settings.prompts)) {
         settings.prompts = {
-            incremental: previousPrompt && previousPrompt !== LEGACY_DEFAULT_PROMPT ? previousPrompt : DEFAULT_PROMPT,
+            incremental: typeof previousPrompt === 'string' && previousPrompt && previousPrompt !== LEGACY_DEFAULT_PROMPT ? previousPrompt : DEFAULT_PROMPT,
             merged: DEFAULT_MERGED_PROMPT,
         };
         migrated = true;
     }
-    settings.prompts.incremental ??= DEFAULT_PROMPT;
-    settings.prompts.merged ??= DEFAULT_MERGED_PROMPT;
+    if (typeof settings.prompts.incremental !== 'string') settings.prompts.incremental = DEFAULT_PROMPT;
+    if (typeof settings.prompts.merged !== 'string') settings.prompts.merged = DEFAULT_MERGED_PROMPT;
     settings.prompt = settings.prompts[settings.mode];
     if (migrated) context.saveSettingsDebounced?.();
     return settings;
@@ -642,6 +824,29 @@ function getSettings() {
 
 function saveSettings() {
     getContext()?.saveSettingsDebounced?.();
+}
+
+async function persistSettingsNow() {
+    saveSettings();
+    enabledSaveChain = enabledSaveChain.catch(() => {}).then(async () => {
+        const native = await import('/script.js');
+        if (typeof native.saveSettings !== 'function') throw new Error('喵，酒馆没有提供立即保存设置的接口，请升级稳定版。');
+        const context = getContext();
+        const event = context?.eventTypes?.SETTINGS_UPDATED;
+        if (!event || typeof context.eventSource?.removeListener !== 'function') {
+            throw new Error('喵，酒馆缺少保存确认接口，请升级稳定版后重试。');
+        }
+        let confirmed = false;
+        const onSaved = () => { confirmed = true; };
+        context.eventSource.on(event, onSaved);
+        try {
+            await native.saveSettings();
+            if (!confirmed) throw new Error('喵，酒馆没有确认设置已写入，请检查连接后再保存一次。');
+        } finally {
+            context.eventSource.removeListener(event, onSaved);
+        }
+    });
+    return await enabledSaveChain;
 }
 
 function randomId() {
@@ -686,11 +891,14 @@ async function ensureArchive(context = getContext()) {
         archive.lastSummarizedThrough = -1;
         archive.round = 0;
         archive.autoTriggerArmed = true;
+        archive.summaryStillOverThreshold = false;
         changed = true;
     }
     if (archive.worldBookName && archive.worldBookName !== settings.worldBookName) {
         archive.lastSummarizedThrough = -1;
         archive.round = 0;
+        archive.autoTriggerArmed = true;
+        archive.summaryStillOverThreshold = false;
         changed = true;
     }
     if (!Number.isInteger(archive.lastSummarizedThrough)) {
@@ -847,10 +1055,10 @@ async function updateWorldBookStatus() {
         const exists = context.getWorldInfoNames().includes(settings.worldBookName);
         const mounted = [...document.querySelectorAll('#world_info option')]
             .some(option => option.textContent?.trim() === settings.worldBookName && option.selected);
-        label.textContent = !exists ? '尚未创建 · 首次大总结时自动创建并全局启用'
-            : mounted ? '已创建 · 已在全局世界书中启用' : '已创建 · 下次大总结时自动全局启用';
+        label.textContent = !exists ? '还没建好喵 · 首次总结会自动创建并全局启用'
+            : mounted ? '世界书建好并全局启用啦喵' : '世界书建好啦喵 · 下次总结会自动全局启用';
     } catch (error) {
-        label.textContent = `无法读取世界书状态：${error.message}`;
+        label.textContent = meowText(`无法读取世界书状态：${error.message}`);
     }
 }
 
@@ -1005,11 +1213,11 @@ async function runLargeSummary({ manual = false } = {}) {
     const context = getContext();
     const current = getCharacterAndChat(context);
     if (!context || !current) {
-        if (manual) window.toastr?.warning?.('请先打开一个角色卡的聊天存档。');
+        if (manual) notify('warning', '请先打开一个角色卡的聊天存档。');
         return;
     }
     if (!canSummarize(context, !manual)) {
-        if (manual) window.toastr?.warning?.('请填写总结提示词。');
+        if (manual) notify('warning', '请填写总结提示词。');
         return;
     }
 
@@ -1023,7 +1231,7 @@ async function runLargeSummary({ manual = false } = {}) {
     let toast = null;
     const showProgress = message => {
         if (toast) window.toastr?.clear?.(toast);
-        toast = window.toastr?.info?.(message, '喵喵大总结', {
+        toast = notify('info', message, '喵喵大总结', {
             timeOut: 0, extendedTimeOut: 0, closeButton: true, tapToDismiss: false,
         });
     };
@@ -1031,7 +1239,7 @@ async function runLargeSummary({ manual = false } = {}) {
     try {
         if (!await waitForCurrentGeneration(context, current.chatId)) {
             setStatus('当前生成尚未结束或聊天已切换，本次总结已取消。');
-            if (manual) window.toastr?.warning?.('当前生成尚未结束或聊天存档已切换，请稍后再试。');
+            if (manual) notify('warning', '当前生成尚未结束或聊天存档已切换，请稍后再试。');
             if (!manual) {
                 const live = getContext();
                 if (live?.chatId === current.chatId && live?.characterId === context.characterId) {
@@ -1064,7 +1272,7 @@ async function runLargeSummary({ manual = false } = {}) {
                 archiveInfo.archive.autoTriggerArmed = true;
                 await context.saveMetadata?.();
             }
-            if (manual) window.toastr?.info?.('没有可总结的旧楼层。');
+            if (manual) notify('info', '没有可总结的旧楼层。');
             return;
         }
         const sourceSnapshot = captureMessageRange(context.chat, range.coveredTo);
@@ -1080,7 +1288,7 @@ async function runLargeSummary({ manual = false } = {}) {
         assertSummaryActive();
         const latestContext = getContext();
         const latestIdentity = getCharacterAndChat(latestContext);
-        if (!summary || !String(summary).trim()) throw new Error('主 API 返回了空的大总结。');
+        if (!summary || !String(summary).trim()) throw new Error('总结 API 没有返回正文喵。');
         if (!latestContext || latestIdentity?.chatId !== archiveInfo.chatId
             || latestContext.characterId !== context.characterId
             || latestContext.chatMetadata?.[MODULE_NAME]?.archiveId !== archiveInfo.archive.archiveId) {
@@ -1094,7 +1302,7 @@ async function runLargeSummary({ manual = false } = {}) {
                 currentArchive.autoTriggerArmed = true;
                 await latestContext.saveMetadata?.();
             }
-            window.toastr?.warning?.('生成期间旧楼层发生变化，这次结果未保存也未隐藏楼层。', '喵喵大总结');
+            notify('warning', '生成期间旧楼层发生变化，这次结果未保存也未隐藏楼层。', '喵喵大总结');
             return;
         }
 
@@ -1103,7 +1311,7 @@ async function runLargeSummary({ manual = false } = {}) {
         assertSummaryActive();
         if (!isSameArchive(getContext(), archiveInfo, context.characterId)
             || !messageRangeMatches(getContext().chat, sourceSnapshot)) {
-            window.toastr?.warning?.('保存前聊天发生变化，这次结果未保存也未隐藏楼层。', '喵喵大总结');
+            notify('warning', '保存前聊天发生变化，这次结果未保存也未隐藏楼层。', '喵喵大总结');
             return;
         }
         const all = listOwnedEntries(data);
@@ -1214,7 +1422,7 @@ async function runLargeSummary({ manual = false } = {}) {
 
         if (!isSameArchive(getContext(), archiveInfo, context.characterId)) {
             console.warn('[自动大总结] 世界书已保存，但聊天存档已经切换；没有修改楼层可见状态。');
-            window.toastr?.info?.('大总结保存成功；聊天已切换，没有隐藏楼层。', '喵喵大总结');
+            notify('info', '大总结保存成功；聊天已切换，没有隐藏楼层。', '喵喵大总结');
             return;
         }
         const currentArchive = latestContext.chatMetadata[MODULE_NAME];
@@ -1232,7 +1440,7 @@ async function runLargeSummary({ manual = false } = {}) {
         if (!isSameArchive(liveContext, archiveInfo, context.characterId)
             || !messageRangeMatches(liveContext.chat, sourceSnapshot)) {
             console.warn('[自动大总结] 保存过程中聊天发生变化；保留总结记录，没有隐藏楼层。');
-            window.toastr?.info?.('大总结保存成功；聊天已变化，没有隐藏楼层。', '喵喵大总结');
+            notify('info', '大总结保存成功；聊天已变化，没有隐藏楼层。', '喵喵大总结');
             return;
         }
         const hideStart = 0;
@@ -1257,18 +1465,18 @@ async function runLargeSummary({ manual = false } = {}) {
         currentArchive.autoTriggerArmed = false;
         await liveContext.saveMetadata?.();
         setStatus(`第 ${round} 次大总结已保存，已隐藏旧楼层，可以继续对话。`);
-        window.toastr?.success?.(`第 ${round} 次大总结保存成功，旧楼层已隐藏，可以继续对话。`, '喵喵大总结');
-        if (manual) scheduleVisibilityRefresh(liveContext);
+        notify('success', `第 ${round} 次大总结保存成功，旧楼层已隐藏，可以继续对话。`, '喵喵大总结');
+        if (manual) scheduleVisibilityRefresh(liveContext, { afterSummary: true });
         void renderDirectory();
         return true;
     } catch (error) {
         if (summaryWasCancelled()) {
             setStatus(summaryCommitted ? '总结记录已保存；本次自动隐藏已取消。' : '本次总结已取消。');
-            window.toastr?.info?.(summaryCommitted ? '大总结保存成功；本次自动隐藏已取消。' : '本次大总结已取消，旧楼层未隐藏。', '喵喵大总结');
+            notify('info', summaryCommitted ? '大总结保存成功；本次自动隐藏已取消。' : '本次大总结已取消，旧楼层未隐藏。', '喵喵大总结');
         } else {
             console.error('[喵喵大总结] 总结失败：', error);
             const failure = `${summaryCommitted ? '大总结已保存，但后续处理失败' : '大总结失败'}：${error?.message ?? error}`;
-            window.toastr?.error?.(failure, '喵喵大总结');
+            notify('error', failure, '喵喵大总结');
             setStatus(`${failure}。已解除发送锁。`);
         }
         if (!summaryCommitted) {
@@ -1318,7 +1526,7 @@ globalThis.meowLargeSummaryGenerationInterceptor = (_chat, _contextSize, abort, 
     // The supported ST interceptor aborts a model generation after slash
     // parsing. Local commands never reach it, and no waiter holds their script.
     abort(true);
-    window.toastr?.info?.('正在检查上下文或进行大总结，请处理完成后再生成。', '喵喵大总结', { preventDuplicates: true });
+    notify('info', '正在检查上下文或进行大总结，请处理完成后再生成。', '喵喵大总结', { preventDuplicates: true });
 };
 
 async function checkAfterReply(pending) {
@@ -1348,7 +1556,12 @@ async function checkAfterReply(pending) {
         setStatus(`${pending.onOpen ? '当前存档' : '本轮回复后'}上下文：${count.toLocaleString()} / ${threshold.toLocaleString()} token`);
         if (count < threshold) {
             archiveInfo.archive.autoTriggerArmed = true;
+            archiveInfo.archive.summaryStillOverThreshold = false;
             await context.saveMetadata?.();
+            return;
+        }
+        if (archiveInfo.archive.summaryStillOverThreshold) {
+            setStatus(`喵，本档总结后仍超阈值，已暂停连续自动总结。当前 ${count.toLocaleString()} / ${threshold.toLocaleString()} token，请先调整设置或手动处理。`);
             return;
         }
         if ((archiveInfo.archive.autoTriggerArmed === false && !pending.onOpen)
@@ -1359,19 +1572,19 @@ async function checkAfterReply(pending) {
         const completed = await runLargeSummary();
         if (completed && stillEnabled() && isSameArchive(getContext(), archiveInfo, context.characterId)) {
             const after = await countAssembledPrompt(getContext(), await assemblePrompt(getContext()));
+            if (!Number.isFinite(after)) throw new Error('喵，酒馆返回了无效的总结后 token 数。');
             if (!stillEnabled() || !isSameArchive(getContext(), archiveInfo, context.characterId)) return;
             archiveInfo.archive.lastPromptTokens = after;
             await renderNativeTokenCounter(getContext());
             if (!stillEnabled()) return;
-            archiveInfo.archive.autoTriggerArmed = after < threshold;
+            reportSummaryTokenCount(archiveInfo.archive, after);
             await getContext().saveMetadata?.();
-            setStatus(`大总结完成，当前上下文：${after.toLocaleString()} token，可以继续对话。`);
         }
     } catch (error) {
         if (!stillEnabled()) return;
         console.error('[喵喵大总结] 回复后阈值检查失败：', error);
         setStatus(`阈值检查失败：${error.message}。已解除发送锁。`);
-        window.toastr?.error?.(`大总结阈值检查失败：${error.message}`);
+        notify('error', `大总结阈值检查失败：${error.message}`);
     } finally {
         thresholdCheckInProgress = false;
         if (pending.locked) {
@@ -1379,6 +1592,18 @@ async function checkAfterReply(pending) {
             unlockSending();
         }
     }
+}
+
+function reportSummaryTokenCount(archive, count) {
+    const threshold = Math.max(1, Number(settings.threshold) || DEFAULT_SETTINGS.threshold);
+    const over = count >= threshold;
+    archive.autoTriggerArmed = !over;
+    archive.summaryStillOverThreshold = over;
+    if (over) {
+        const message = `总结已保存喵，但当前仍有 ${count.toLocaleString()} / ${threshold.toLocaleString()} token。已停止连续自动总结，请减少保留楼层、精简预设或世界书，或手动切换合并模式处理；原总结记录已保留。`;
+        setStatus(message);
+        notify('warning', message, '喵喵大总结', { timeOut: 12000, closeButton: true });
+    } else setStatus(`大总结完成，当前上下文：${count.toLocaleString()} token，可以继续对话喵。`);
 }
 
 function maybeSchedulePending() {
@@ -1466,7 +1691,7 @@ function scheduleChatSync({ checkThreshold = true } = {}) {
         if (revision === chatSyncRevision) {
             console.error('[喵喵大总结] 存档同步失败：', error);
             setStatus(`存档同步失败：${error.message}`);
-            window.toastr?.error?.(`大总结存档同步失败：${error.message}`);
+            notify('error', `大总结存档同步失败：${error.message}`);
         }
     }).finally(unlockSending);
     return chatSyncChain;
@@ -1552,7 +1777,7 @@ async function deleteSummarySelection({ roundOnly = false } = {}) {
         if (live?.chatMetadata?.[MODULE_NAME]?.archiveId === selection.archiveId) {
             Object.assign(live.chatMetadata[MODULE_NAME], {
                 lastSummarizedThrough: remaining.at(-1)?.coveredTo ?? -1,
-                round: remaining.at(-1)?.round ?? 0, autoTriggerArmed: true,
+                round: remaining.at(-1)?.round ?? 0, autoTriggerArmed: true, summaryStillOverThreshold: false,
             });
             await live.saveMetadata?.();
         }
@@ -1563,7 +1788,7 @@ async function deleteSummarySelection({ roundOnly = false } = {}) {
         await syncCurrentArchive();
         await renderDirectory();
         if (remaining.length) showSummary(persisted.entries[selection.uid]);
-        window.toastr?.success?.(roundOnly ? '本轮总结已删除。' : '聊天档的总结条目已删除。');
+        notify('success', roundOnly ? '本轮总结已删除。' : '聊天档的总结条目已删除。');
     } finally {
         archiveEditInProgress = false;
         unlockSending();
@@ -1619,7 +1844,7 @@ async function renderDirectory({ reload = true } = {}) {
     ui.querySelector('.als-page-prev').disabled = directoryPage === 0;
     ui.querySelector('.als-page-next').disabled = directoryPage >= totalPages - 1;
     if (!cards.length) {
-        tree.append(createElement('p', 'als-muted', rows.length ? '没有匹配的角色或聊天存档。' : '暂无大总结。首次总结会自动创建并启用世界书。'));
+        tree.append(createElement('p', 'als-muted', rows.length ? '喵，没找到匹配的角色或聊天档。' : '小窝还空着喵，首次总结会自动建好并启用世界书。'));
         return;
     }
     for (const card of cards.slice(directoryPage * DIRECTORY_PAGE_SIZE, (directoryPage + 1) * DIRECTORY_PAGE_SIZE)) {
@@ -1640,7 +1865,7 @@ async function renderDirectory({ reload = true } = {}) {
             remove.addEventListener('click', () => {
                 if (sendLockDepth) return;
                 showSummary(row.entry);
-                void deleteSummarySelection().catch(error => window.toastr?.error?.(error.message));
+                void deleteSummarySelection().catch(error => notify('error', error.message));
             });
             line.append(name, count, view, remove);
             details.append(line);
@@ -1674,9 +1899,9 @@ function syncPromptEditor() {
     const draft = promptDrafts[promptEditorMode] ?? settings.prompts[promptEditorMode];
     ui.querySelector('.als-prompt').value = draft;
     ui.querySelector('.als-mode-description').textContent = settingsDraft.mode === 'incremental'
-        ? '每轮只总结新增剧情，追加进同一聊天档的同一条目。'
-        : '每轮汇总已有总结和新增剧情，用完整新总结替换同一条目的正文。';
-    ui.querySelector('.als-prompt-state').textContent = draft === settings.prompts[promptEditorMode] ? '已保存' : '有未保存的修改';
+        ? '每轮只记新增剧情喵，接着写进这个聊天档的原条目。'
+        : '把旧总结和新剧情整理到一起喵，用新全文替换原条目，历史记录仍会留着。';
+    ui.querySelector('.als-prompt-state').textContent = draft === settings.prompts[promptEditorMode] ? '提示词已经记住喵' : '还没保存喵';
 }
 
 function changeMode(mode) {
@@ -1685,19 +1910,31 @@ function changeMode(mode) {
     syncPromptEditor();
 }
 
-function savePromptDraft() {
+async function savePromptDraft() {
     if (sendLockDepth) return;
     const draft = ui.querySelector('.als-prompt').value;
     if (!draft.trim()) {
-        window.toastr?.warning?.('提示词不能为空。');
+        notify('warning', '提示词不能为空。');
         return;
     }
-    promptDrafts[promptEditorMode] = draft;
-    settings.prompts[promptEditorMode] = draft;
+    const mode = promptEditorMode;
+    const previous = settings.prompts[mode];
+    promptDrafts[mode] = draft;
+    settings.prompts[mode] = draft;
     settings.prompt = settings.prompts[settings.mode];
-    saveSettings();
-    syncPromptEditor();
-    window.toastr?.success?.(`${MODE_LABELS[promptEditorMode]}提示词已保存。`);
+    lockSending();
+    try {
+        await persistSettingsNow();
+        syncPromptEditor();
+        notify('success', `${MODE_LABELS[promptEditorMode]}提示词已保存，刷新或重启也会记得喵。`);
+    } catch (error) {
+        settings.prompts[mode] = previous;
+        settings.prompt = settings.prompts[settings.mode];
+        ui.querySelector('.als-prompt-state').textContent = '保存没有成功喵，请重试。';
+        notify('error', `提示词保存失败：${error.message}`);
+    } finally {
+        unlockSending();
+    }
 }
 
 function bindInput(selector, key, transform = value => value) {
@@ -1712,11 +1949,14 @@ function bindInput(selector, key, transform = value => value) {
 }
 
 function syncSettingsState() {
-    ui.querySelector('.als-settings-state').textContent = SETTING_FIELDS.some(key => settingsDraft[key] !== settings[key])
-        ? '有未保存的设置，点击保存设置后生效' : '设置已保存';
+    ui.querySelector('.als-settings-state').textContent = SETTING_FIELDS.some(key => key === 'secondaryModels'
+        ? JSON.stringify(settingsDraft[key]) !== JSON.stringify(settings[key]) : settingsDraft[key] !== settings[key])
+        ? '有设置还没记住喵，点击保存设置后生效' : '设置已保存喵';
     const atDepth = settingsDraft.instructionPosition === 'depth';
     ui.querySelector('.als-instruction-depth-field').hidden = !atDepth;
     ui.querySelector('.als-instruction-role-field').hidden = settingsDraft.instructionPosition === 'tail';
+    const secondary = ui.querySelector('.als-secondary-settings');
+    if (secondary) secondary.hidden = settingsDraft.apiMode !== 'secondary';
 }
 
 function populateSettingsDraft() {
@@ -1725,6 +1965,8 @@ function populateSettingsDraft() {
         worldBookName: '.als-book', depth: '.als-depth', mode: '.als-settings-mode',
         instructionPosition: '.als-instruction-position', instructionDepth: '.als-instruction-depth',
         instructionRole: '.als-instruction-role',
+        apiMode: '.als-api-mode', secondaryUrl: '.als-secondary-url',
+        secondaryKey: '.als-secondary-key', secondaryModel: '.als-secondary-model',
     };
     for (const [key, selector] of Object.entries(controls)) {
         const input = ui.querySelector(selector);
@@ -1732,6 +1974,7 @@ function populateSettingsDraft() {
         else input.value = settingsDraft[key];
     }
     syncPromptEditor();
+    renderModelOptions();
     syncSettingsState();
 }
 
@@ -1739,11 +1982,24 @@ async function saveSettingsDraft() {
     if (sendLockDepth) return;
     const name = String(settingsDraft.worldBookName).trim();
     if (!name || /[\\/:*?"<>|\x00-\x1f]/.test(name) || /[. ]$/.test(name)) {
-        window.toastr?.warning?.('请填写有效的世界书名称。');
+        notify('warning', '请填写有效的世界书名称。');
         return;
+    }
+    if (settingsDraft.apiMode === 'secondary') {
+        try {
+            const config = getSecondaryConfig(settingsDraft);
+            settingsDraft.secondaryUrl = config.url;
+            settingsDraft.secondaryKey = config.key;
+            settingsDraft.secondaryModel = config.model;
+        } catch (error) {
+            notify('warning', error.message);
+            return;
+        }
     }
     archiveEditInProgress = true;
     lockSending();
+    const previousSettings = Object.fromEntries(SETTING_FIELDS.map(key => [key, structuredClone(settings[key])]));
+    const saveEnabledRevision = enabledRevision;
     try {
         const context = getContext();
         if (name !== settings.worldBookName) {
@@ -1765,16 +2021,19 @@ async function saveSettingsDraft() {
             if (!settings.enabled) cancelPendingAutoSummary();
         }
         settings.prompt = settings.prompts[settings.mode];
-        saveSettings();
-        const { saveSettings: flushSettings } = await import('/script.js');
-        if (typeof flushSettings === 'function') await flushSettings();
+        await persistSettingsNow();
         directoryData = null;
         selectedSummary = null;
         ui.querySelector('.als-preview-box').hidden = true;
         populateSettingsDraft();
-        window.toastr?.success?.('设置已保存。');
+        notify('success', '设置已保存喵。');
     } catch (error) {
-        window.toastr?.error?.(error.message);
+        const liveEnabled = settings.enabled;
+        Object.assign(settings, previousSettings);
+        if (enabledRevision !== saveEnabledRevision) settings.enabled = liveEnabled;
+        settings.prompt = settings.prompts[settings.mode];
+        syncSettingsState();
+        notify('error', error.message);
         return;
     } finally {
         archiveEditInProgress = false;
@@ -1809,7 +2068,7 @@ function renderUpdateNotice() {
     const visible = Boolean(availableUpdate && dismissedUpdate !== availableUpdate.key);
     ui.querySelector('.als-update-badge').hidden = !visible;
     ui.querySelector('.als-update-notice').hidden = !visible;
-    if (visible) ui.querySelector('.als-update-title').textContent = `发现新版本：${availableUpdate.version}`;
+    if (visible) ui.querySelector('.als-update-title').textContent = `喵！发现新版本：${availableUpdate.version}`;
 }
 
 async function checkForUpdate({ silent = false } = {}) {
@@ -1818,7 +2077,7 @@ async function checkForUpdate({ silent = false } = {}) {
     const label = ui.querySelector('.als-update-status');
     const button = ui.querySelector('.als-update-check');
     button.disabled = true;
-    label.textContent = '正在检查更新…';
+    label.textContent = '喵喵正在看看有没有更新…';
     try {
         const installation = await getInstalledExtension();
         const version = await extensionApi('version', installation);
@@ -1839,12 +2098,12 @@ async function checkForUpdate({ silent = false } = {}) {
                 } catch { /* The ST Git check remains authoritative if version labels cannot be read. */ }
             }
             availableUpdate = { installation, version: remoteVersion, key: `${remoteVersion}:${version.currentCommitHash}` };
-            label.textContent = `有可用更新：${remoteVersion}`;
-        } else label.textContent = `当前 v${EXTENSION_VERSION}，已是最新版本`;
+            label.textContent = `新版本到啦喵：${remoteVersion}`;
+        } else label.textContent = `当前 v${EXTENSION_VERSION}，已经是最新版本喵`;
         renderUpdateNotice();
     } catch (error) {
         label.textContent = error.message;
-        if (!silent) window.toastr?.warning?.(error.message);
+        if (!silent) notify('warning', error.message);
     } finally {
         updateCheckInProgress = false;
         button.disabled = false;
@@ -1854,7 +2113,7 @@ async function checkForUpdate({ silent = false } = {}) {
 const UPDATE_DRAFT_KEY = `meow-summary-update-draft:${location.pathname}`;
 
 export async function onExtensionUpdate() {
-    window.toastr?.info?.('喵喵大总结已更新，当前处理完成后自动刷新酒馆。');
+    notify('info', '喵喵大总结已更新，当前处理完成后自动刷新酒馆。');
     const native = await import('/script.js');
     while (sendLockDepth || runInProgress || thresholdCheckInProgress || archiveEditInProgress
         || native.is_send_press || native.isGenerating?.() || document.body.dataset.generating === 'true'
@@ -1866,10 +2125,11 @@ export async function onExtensionUpdate() {
         const draft = document.querySelector('#send_textarea')?.value;
         if (draft) sessionStorage.setItem(UPDATE_DRAFT_KEY, JSON.stringify({ text: draft, time: Date.now() }));
         // Flush the debounced ST settings save before unloading this page.
-        if (typeof native.saveSettings === 'function') await native.saveSettings();
+        await persistSettingsNow();
+        await enabledSaveChain;
         location.reload();
     } catch (error) {
-        window.toastr?.error?.(`插件已更新，但自动刷新失败：${error.message}。请手动刷新酒馆。`);
+        notify('error', `插件已更新，但自动刷新失败：${error.message}。请手动刷新酒馆。`);
     } finally {
         unlockSending();
     }
@@ -1880,13 +2140,13 @@ async function updateExtensionNow() {
     updateInProgress = true;
     const button = ui.querySelector('.als-update-apply');
     button.disabled = true;
-    button.textContent = '更新中…';
+    button.textContent = '正在更新喵…';
     try {
         const installation = availableUpdate?.installation ?? await getInstalledExtension();
         await extensionApi('update', installation);
         await onExtensionUpdate();
     } catch (error) {
-        window.toastr?.error?.(error.message);
+        notify('error', error.message);
         ui.querySelector('.als-update-status').textContent = error.message;
     } finally {
         updateInProgress = false;
@@ -1915,7 +2175,7 @@ async function renderSettings() {
     ui.innerHTML = `
       <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-          <div class="als-heading"><b>喵喵大总结</b><span class="als-update-badge" hidden>New!</span></div>
+          <div class="als-heading"><b>喵喵大总结</b><span class="als-update-badge" hidden>mewo!!</span></div>
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
@@ -1926,19 +2186,30 @@ async function renderSettings() {
             <button type="button" class="als-update-dismiss" aria-label="关闭更新提示">×</button>
           </div>
           <div class="als-tabs" role="tablist" aria-label="喵喵大总结">
-            <button type="button" class="als-tab als-tab-active" id="als-tab-settings" data-tab="settings" role="tab" aria-selected="true" aria-controls="als-panel-settings">设置</button>
+            <button type="button" class="als-tab als-tab-active" id="als-tab-settings" data-tab="settings" role="tab" aria-selected="true" aria-controls="als-panel-settings">喵喵设置</button>
             <button type="button" class="als-tab" id="als-tab-prompt" data-tab="prompt" role="tab" aria-selected="false" aria-controls="als-panel-prompt" tabindex="-1">提示词</button>
-            <button type="button" class="als-tab" id="als-tab-directory" data-tab="directory" role="tab" aria-selected="false" aria-controls="als-panel-directory" tabindex="-1">总结目录</button>
+            <button type="button" class="als-tab" id="als-tab-directory" data-tab="directory" role="tab" aria-selected="false" aria-controls="als-panel-directory" tabindex="-1">总结小窝</button>
           </div>
-          <div class="als-status" role="status" aria-live="polite">打开存档及普通回复结束后检查实际 token。</div>
+          <div class="als-status" role="status" aria-live="polite">打开存档、普通回复结束后，喵喵会检查实际 token。</div>
           <div class="als-panel" id="als-panel-settings" data-panel="settings" role="tabpanel" aria-labelledby="als-tab-settings">
             <label class="als-check"><input class="als-enabled" type="checkbox"><span>启用</span></label>
-            <small class="als-muted">启用开关立即保存；下方设置修改后点击“保存设置”。</small>
+            <small class="als-muted">开关会马上记住喵；下面的设置改好后，记得点“保存设置”。</small>
             <div class="als-grid">
               <label>触发 token 数<input class="text_pole als-threshold" type="number" min="1" step="1000"></label>
               <label>保留最近楼层<input class="text_pole als-keep" type="number" min="1" step="1"></label>
               <label>世界书名称<input class="text_pole als-book" type="text" maxlength="80"></label>
               <label>插入深度<input class="text_pole als-depth" type="number" min="0" step="1"></label>
+            </div>
+            <label class="als-field">大总结用哪个 API 喵？
+              <select class="text_pole als-api-mode"><option value="main">酒馆主 API（跟随当前连接）</option><option value="secondary">副 API（OpenAI 兼容 / 自定义）</option></select>
+            </label>
+            <div class="als-secondary-settings" hidden>
+              <small class="als-muted">副 API 只负责大总结喵，提示词环境仍沿用酒馆发送时的处理。</small>
+              <label class="als-field">副 API 基础 URL<input class="text_pole als-secondary-url" type="url" placeholder="https://api.example.com/v1" autocomplete="off" spellcheck="false"></label>
+              <label class="als-field">副 API Key（无密钥服务可留空）<input class="text_pole als-secondary-key" type="password" autocomplete="new-password" spellcheck="false"></label>
+              <div class="als-model-state"><small class="als-model-status als-muted" role="status">填好 URL 和 Key 后，喵喵会帮你拉取模型。</small><button type="button" class="menu_button als-model-fetch">拉取模型</button></div>
+              <label class="als-field">副 API 模型<input class="text_pole als-secondary-model" type="text" list="als-secondary-model-options" placeholder="从列表选择，也可以手填模型名" autocomplete="off" spellcheck="false"><datalist class="als-model-options" id="als-secondary-model-options"></datalist></label>
+              <small class="als-muted">选好模型后和其他设置一起保存喵。采样与输出长度沿用当前生成参数。</small>
             </div>
             <label class="als-field">总结模式
               <select class="text_pole als-mode als-settings-mode"><option value="incremental">多次大总结</option><option value="merged">合并大总结</option></select>
@@ -1959,16 +2230,16 @@ async function renderSettings() {
             <small class="als-muted">此处控制总结指令的位置；上方“插入深度”控制保存后的世界书条目。选择 @D、深度 0、system 即为 D0 系统层。</small>
             <div class="als-actions">
               <button type="button" class="menu_button als-settings-save">保存设置</button>
-              <button type="button" class="menu_button als-settings-reset">恢复默认设置</button>
+              <button type="button" class="menu_button als-settings-reset">回到默认设置</button>
             </div>
-            <small class="als-settings-state als-muted" role="status">设置已保存</small>
+            <small class="als-settings-state als-muted" role="status">设置已经记住喵。</small>
             <div class="als-book-state">
-              <span class="als-book-status als-muted">正在读取世界书状态…</span>
+              <span class="als-book-status als-muted">喵喵正在看看世界书…</span>
               <button type="button" class="menu_button als-book-check">刷新状态</button>
             </div>
-            <button type="button" class="menu_button als-run">立即大总结</button>
-            <small class="als-muted">首次总结自动创建并全局启用世界书。每个聊天档使用一个条目，自动勾选防止进一步递归；仅当前档启用。</small>
-            <div class="als-update-state"><small class="als-update-status als-muted">尚未检查更新</small><button type="button" class="menu_button als-update-check">检查更新</button></div>
+            <button type="button" class="menu_button als-run">马上大总结喵</button>
+            <small class="als-muted">第一次总结会自动建好并挂上全局世界书喵。每个聊天档一个条目，自动防止递归；只启用当前档。</small>
+            <div class="als-update-state"><small class="als-update-status als-muted">喵，还没看看有没有更新</small><button type="button" class="menu_button als-update-check">检查更新</button></div>
           </div>
           <div class="als-panel" id="als-panel-prompt" data-panel="prompt" role="tabpanel" aria-labelledby="als-tab-prompt" hidden>
             <label class="als-field">编辑模式
@@ -1979,10 +2250,10 @@ async function renderSettings() {
             </label>
             <div class="als-actions">
               <button type="button" class="menu_button als-prompt-save">保存修改提示词</button>
-              <button type="button" class="menu_button als-prompt-reset">恢复默认提示词</button>
+              <button type="button" class="menu_button als-prompt-reset">回到默认提示词</button>
             </div>
-            <small class="als-prompt-state als-muted" role="status">已保存</small>
-            <small class="als-muted">两种模式分别保存提示词。这里选择要编辑的提示词；实际使用的模式请在“设置”中选择并保存。已有历史记录保留。</small>
+            <small class="als-prompt-state als-muted" role="status">提示词已经记住喵。</small>
+            <small class="als-muted">两种模式的提示词分开记住喵。这里选要编辑的模板；实际总结模式在“喵喵设置”里保存。点击保存后，刷新和重启都不会丢；回到默认只改编辑框，还要保存才生效。</small>
           </div>
           <div class="als-panel" id="als-panel-directory" data-panel="directory" role="tabpanel" aria-labelledby="als-tab-directory" hidden>
             <div class="als-directory-tools">
@@ -2014,6 +2285,27 @@ async function renderSettings() {
     bindInput('.als-book', 'worldBookName', value => String(value).trim());
     bindInput('.als-depth', 'depth', value => Math.max(0, Math.floor(Number(value) || 0)));
     bindInput('.als-settings-mode', 'mode', String);
+    bindInput('.als-api-mode', 'apiMode', String);
+    bindInput('.als-secondary-url', 'secondaryUrl', value => String(value).trim());
+    bindInput('.als-secondary-key', 'secondaryKey', String);
+    bindInput('.als-secondary-model', 'secondaryModel', value => String(value).trim());
+    ui.querySelector('.als-model-fetch').addEventListener('click', () => void fetchSecondaryModels());
+    ui.querySelector('.als-api-mode').addEventListener('change', () => {
+        if (settingsDraft.apiMode === 'secondary' && !settingsDraft.secondaryModels.length) scheduleModelFetch();
+    });
+    for (const selector of ['.als-secondary-url', '.als-secondary-key']) {
+        ui.querySelector(selector).addEventListener('input', () => {
+            modelFetchRevision += 1;
+            modelFetchController?.abort();
+            modelFetchController = null;
+            settingsDraft.secondaryModels = [];
+            renderModelOptions();
+            ui.querySelector('.als-model-fetch').disabled = Boolean(sendLockDepth);
+            ui.querySelector('.als-model-status').textContent = '连接信息改好后，喵喵会重新找模型。';
+            syncSettingsState();
+        });
+        ui.querySelector(selector).addEventListener('change', scheduleModelFetch);
+    }
     bindInput('.als-instruction-position', 'instructionPosition', String);
     bindInput('.als-instruction-depth', 'instructionDepth', value => Math.min(10000, Math.max(0, Math.floor(Number(value) || 0))));
     bindInput('.als-instruction-role', 'instructionRole', Number);
@@ -2021,7 +2313,12 @@ async function renderSettings() {
     ui.querySelector('.als-settings-save').addEventListener('click', () => void saveSettingsDraft());
     ui.querySelector('.als-settings-reset').addEventListener('click', () => {
         if (sendLockDepth) return;
-        settingsDraft = Object.fromEntries(SETTING_FIELDS.map(key => [key, DEFAULT_SETTINGS[key]]));
+        modelFetchRevision += 1;
+        modelFetchController?.abort();
+        modelFetchController = null;
+        ui.querySelector('.als-model-fetch').disabled = false;
+        ui.querySelector('.als-model-status').textContent = '填好 URL 和 Key 后，喵喵会帮你拉取模型。';
+        settingsDraft = Object.fromEntries(SETTING_FIELDS.map(key => [key, structuredClone(DEFAULT_SETTINGS[key])]));
         populateSettingsDraft();
     });
     ui.querySelector('.als-update-check').addEventListener('click', () => void checkForUpdate());
@@ -2043,9 +2340,9 @@ async function renderSettings() {
     }
     ui.querySelector('.als-prompt').addEventListener('input', event => {
         promptDrafts[promptEditorMode] = event.target.value;
-        ui.querySelector('.als-prompt-state').textContent = event.target.value === settings.prompts[promptEditorMode] ? '已保存' : '有未保存的修改';
+        ui.querySelector('.als-prompt-state').textContent = event.target.value === settings.prompts[promptEditorMode] ? '提示词已经记住喵' : '还没保存喵';
     });
-    ui.querySelector('.als-prompt-save').addEventListener('click', savePromptDraft);
+    ui.querySelector('.als-prompt-save').addEventListener('click', () => void savePromptDraft());
     ui.querySelector('.als-prompt-reset').addEventListener('click', () => {
         if (sendLockDepth) return;
         promptDrafts[promptEditorMode] = promptEditorMode === 'merged' ? DEFAULT_MERGED_PROMPT : DEFAULT_PROMPT;
@@ -2074,8 +2371,8 @@ async function renderSettings() {
         ui.querySelector('.als-preview').scrollTop = 0;
         ui.querySelector('.als-delete-round').disabled = event.target.value === 'all' || Boolean(sendLockDepth);
     });
-    ui.querySelector('.als-delete-round').addEventListener('click', () => void deleteSummarySelection({ roundOnly: true }).catch(error => window.toastr?.error?.(error.message)));
-    ui.querySelector('.als-preview-box .als-delete-archive').addEventListener('click', () => void deleteSummarySelection().catch(error => window.toastr?.error?.(error.message)));
+    ui.querySelector('.als-delete-round').addEventListener('click', () => void deleteSummarySelection({ roundOnly: true }).catch(error => notify('error', error.message)));
+    ui.querySelector('.als-preview-box .als-delete-archive').addEventListener('click', () => void deleteSummarySelection().catch(error => notify('error', error.message)));
     void updateWorldBookStatus();
     void checkForUpdate({ silent: true });
 }
