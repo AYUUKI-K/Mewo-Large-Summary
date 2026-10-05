@@ -160,17 +160,31 @@ async function ensureWorldBook(context = getContext()) {
     if (!name) throw new Error('请先填写大总结世界书名称。');
     if (name.includes(',')) throw new Error('世界书名称不能包含英文逗号（SillyTavern 的世界书命令会用逗号拆分名称）。');
 
-    let data = await context.loadWorldInfo(name);
-    if (!data) {
-        const names = context.getWorldInfoNames?.() ?? [];
-        if (names.includes(name)) {
-            throw new Error(`世界书“${name}”存在，但读取失败。`);
-        }
-        await context.saveWorldInfo(name, { entries: {} }, true);
-        await context.updateWorldInfoList?.();
-        data = await context.loadWorldInfo(name);
+    if (typeof context?.updateWorldInfoList !== 'function' || typeof context?.getWorldInfoNames !== 'function') {
+        throw new Error('当前 SillyTavern 没有提供世界书列表接口，请更新到稳定版后重试。');
     }
-    if (!data) throw new Error(`无法创建或读取世界书“${name}”。`);
+
+    await context.updateWorldInfoList();
+    let names = context.getWorldInfoNames();
+    let data = await context.loadWorldInfo(name);
+    if (names.includes(name)) {
+        if (!data) throw new Error(`世界书“${name}”已在列表中，但读取失败。`);
+        return data;
+    }
+
+    // Never overwrite a book returned by the backend if the settings list is stale.
+    if (data) throw new Error(`世界书“${name}”可以读取，但没有出现在酒馆世界书列表中；为避免覆盖，已停止创建。请刷新酒馆后重试。`);
+
+    await context.saveWorldInfo(name, { entries: {} }, true);
+    await context.updateWorldInfoList();
+    names = context.getWorldInfoNames();
+    if (!names.includes(name)) {
+        throw new Error(`酒馆没有确认创建世界书“${name}”。请查看控制台或服务器日志后重试。`);
+    }
+    data = await context.loadWorldInfo(name);
+    if (!data || !data.entries || typeof data.entries !== 'object') {
+        throw new Error(`世界书“${name}”已加入列表，但读取内容失败。`);
+    }
     return data;
 }
 
@@ -180,10 +194,23 @@ function escapeSlashArgument(value) {
 
 async function activateWorldBook(context = getContext()) {
     const name = settings.worldBookName;
-    const option = [...document.querySelectorAll('#world_info option')]
+    const findOption = () => [...document.querySelectorAll('#world_info option')]
         .find(item => item.textContent?.trim() === name);
-    if (option?.selected) return;
-    await context.executeSlashCommandsWithOptions?.(`/world state=on silent=true "${escapeSlashArgument(name)}"`);
+
+    await context.updateWorldInfoList?.();
+    let option = findOption();
+    if (!option) throw new Error(`世界书“${name}”已保存，但未出现在全局世界书列表中。请刷新酒馆后重试。`);
+    if (!option.selected) {
+        if (typeof context.executeSlashCommandsWithOptions !== 'function') {
+            throw new Error('当前 SillyTavern 无法启用全局世界书，请更新到稳定版后重试。');
+        }
+        await context.executeSlashCommandsWithOptions(`/world state=on silent=true "${escapeSlashArgument(name)}"`);
+        await context.updateWorldInfoList?.();
+        option = findOption();
+    }
+    if (!option?.selected) {
+        throw new Error(`世界书“${name}”已创建，但没有成功挂载到全局世界书。请在酒馆顶部的全局世界书列表中手动启用一次。`);
+    }
 }
 
 async function setArchiveActivation(archiveId, { reconcileCursor = false } = {}) {
@@ -700,7 +727,10 @@ async function renderSettings() {
     ui.innerHTML = `
       <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-          <b>喵喵大总结</b>
+          <span class="als-brand">
+            <b>喵喵大总结</b>
+            <small class="als-version">v0.1.1 · by NUE-喵喵电波</small>
+          </span>
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
@@ -715,9 +745,9 @@ async function renderSettings() {
             <textarea class="als-prompt" rows="15" spellcheck="false"></textarea>
           </label>
           <div class="als-actions">
-            <button type="button" class="menu_button als-book-open">创建/启用世界书</button>
+            <button type="button" class="menu_button als-book-open">创建并启用世界书</button>
             <button type="button" class="menu_button als-run">立即大总结</button>
-            <button type="button" class="menu_button als-directory-toggle">查看大总结目录</button>
+            <button type="button" class="menu_button als-directory-toggle">查看总结目录</button>
           </div>
           <div class="als-directory" hidden>
             <div class="als-tree"></div>
@@ -750,7 +780,7 @@ async function renderSettings() {
             await ensureWorldBook(context);
             const archiveInfo = await ensureArchive(context);
             await setArchiveActivation(archiveInfo?.archive.archiveId, { reconcileCursor: true });
-            window.toastr?.success?.(`世界书“${settings.worldBookName}”已准备好。`);
+            window.toastr?.success?.(`世界书“${settings.worldBookName}”已创建并挂载到全局列表。`);
         } catch (error) {
             window.toastr?.error?.(error.message);
         }
@@ -758,7 +788,7 @@ async function renderSettings() {
     ui.querySelector('.als-directory-toggle').addEventListener('click', async event => {
         const directory = ui.querySelector('.als-directory');
         directory.hidden = !directory.hidden;
-        event.currentTarget.textContent = directory.hidden ? '查看大总结目录' : '收起大总结目录';
+        event.currentTarget.textContent = directory.hidden ? '查看总结目录' : '收起总结目录';
         if (!directory.hidden) await renderDirectory();
     });
 }
