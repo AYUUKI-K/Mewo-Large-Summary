@@ -7,6 +7,7 @@ import { SourceTextModule, SyntheticModule, createContext } from 'node:vm';
 
 const source = await readFile(process.env.MEOW_TEST_SOURCE || new URL('../index.js', import.meta.url), 'utf8');
 const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
+const stylesheet = await readFile(new URL('../style.css', import.meta.url), 'utf8');
 
 async function fixture(savedSettings = {}) {
     const notices = [];
@@ -679,7 +680,7 @@ test('plugin native hide is not treated as a manual edit and hides exactly once 
     assert.deepEqual(f.executed, ['/hide 0-9']);
 });
 
-test('a native unhide completion automatically schedules the recount even when automatic summaries are disabled', async () => {
+test('disabled plugin leaves native unhide alone without scheduling a recount', async () => {
     const f = await fixture({ enabled: false });
     const nativeExecute = f.context.executeSlashCommandsWithOptions.bind(f.context);
     f.context.SlashCommandParser = { commands: { unhide: { callback: async (_args, range) => nativeExecute(`/unhide ${range}`) } } };
@@ -689,13 +690,214 @@ test('a native unhide completion automatically schedules the recount even when a
     await nativeExecute('/hide 0-9');
     f.api.installVisibilityCommandHooks();
     await f.context.SlashCommandParser.commands.unhide.callback({}, '0-9999');
-    const deadline = Date.now() + 2000;
-    while (!f.tokenRenders.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
-    assert.deepEqual(f.tokenRenders, [false]);
-    assert.match(f.api.evaluate("ui.querySelector('.als-status').textContent"), /75,000/);
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.deepEqual(f.tokenRenders, []);
+    assert.equal(f.api.evaluate('visibilityRefreshTimer'), null);
     assert.deepEqual(f.executed, ['/hide 0-9', '/unhide 0-9999']);
     assert.ok(f.context.chat.every(message => !message.is_system));
     assert.equal(f.writes.length, 0);
+});
+
+test('disabled startup and chat sync do not read books, create metadata, lock sends or run summaries', async () => {
+    const f = await fixture({ enabled: false });
+    f.context.updateWorldInfoList = async () => assert.fail('disabled world book read');
+    f.context.generate = async () => assert.fail('disabled generation');
+    await f.api.evaluate('scheduleChatSync()');
+    await f.api.evaluate('syncCurrentArchive()');
+    await f.api.evaluate('updateWorldBookStatus()');
+    await f.api.evaluate('renderDirectory()');
+    await f.api.refreshVisibilityTokens(f.context);
+    assert.equal(await f.api.runLargeSummary({ manual: true }), false);
+    f.api.onGenerationAfterCommands('normal', {}, false);
+    assert.equal(f.api.state().pendingGeneration, null);
+    assert.equal(f.api.state().sendLockDepth, 0);
+    assert.deepEqual(f.context.chatMetadata, {});
+    assert.equal(f.writes.length, 0);
+    assert.equal(f.notices.length, 0);
+});
+
+test('turning off invalidates an already queued chat sync and releases its lock', async () => {
+    const f = await fixture();
+    f.api.evaluate('syncCurrentArchive = async () => { throw new Error("should not sync"); }');
+    const queued = f.api.evaluate('scheduleChatSync()');
+    f.api.applyEnabledState(false);
+    await queued;
+    await f.api.evaluate('enabledSaveChain');
+    assert.equal(f.api.state().sendLockDepth, 0);
+    assert.deepEqual(f.context.chatMetadata, {});
+    assert.match(f.controls.get('.als-status').textContent, /插件已关闭/);
+    assert.ok(!f.notices.some(notice => notice.kind === 'error'));
+});
+
+test('turning off during a book read prevents archive activation and further counting', async () => {
+    const f = await fixture();
+    f.api.evaluate(`prepareWorldBook = async () => { applyEnabledState(false); return { entries: {} }; };
+        setArchiveActivation = async () => { throw new Error('disabled activation'); };
+        assemblePrompt = async () => { throw new Error('disabled count'); };`);
+    await f.api.evaluate('scheduleChatSync()');
+    await f.api.evaluate('enabledSaveChain');
+    assert.equal(f.api.state().sendLockDepth, 0);
+    assert.equal(f.writes.length, 0);
+    assert.ok(!f.notices.some(notice => notice.kind === 'error'));
+});
+
+test('hooks installed while enabled bypass all plugin observation after it is disabled', async () => {
+    const f = await fixture();
+    let calls = 0;
+    f.context.SlashCommandParser = { commands: { hide: { callback: async () => { calls++; return 'native'; } } } };
+    f.api.installVisibilityCommandHooks();
+    f.api.applyEnabledState(false);
+    await f.api.evaluate('enabledSaveChain');
+    const revision = f.api.evaluate('manualVisibilityRevision');
+    assert.equal(await f.context.SlashCommandParser.commands.hide.callback(), 'native');
+    f.api.blockSendInput(f.event());
+    assert.equal(calls, 1);
+    assert.equal(f.api.evaluate('manualVisibilityRevision'), revision);
+    assert.equal(f.api.evaluate('visibilityRefreshTimer'), null);
+    f.api.lockSending();
+    let aborts = 0;
+    f.interceptor([], 60000, () => aborts++, 'normal');
+    assert.equal(aborts, 0);
+    f.api.unlockSending();
+});
+
+test('turning off cancels a pending visibility preview before it counts or writes', async () => {
+    const f = await fixture();
+    f.api.evaluate(`assemblePrompt = async () => { applyEnabledState(false); return {}; };
+        countAssembledPrompt = async () => { throw new Error('disabled token count'); };`);
+    await f.api.refreshVisibilityTokens(f.context);
+    await f.api.evaluate('enabledSaveChain');
+    assert.equal(f.tokenRenders.length, 0);
+    assert.deepEqual(f.context.chatMetadata, {});
+    assert.equal(f.api.state().sendLockDepth, 0);
+});
+
+test('disabled initialization and chat/reply events leave chat and world books untouched', async () => {
+    const f = await fixture({ enabled: false });
+    Object.assign(f.context.eventTypes, {
+        GENERATION_STARTED: 'start', GENERATION_AFTER_COMMANDS: 'commands', GENERATE_AFTER_DATA: 'data',
+        CHAT_COMPLETION_SETTINGS_READY: 'ready', MESSAGE_RECEIVED: 'received', GENERATION_ENDED: 'end',
+        CHAT_CHANGED: 'changed', CHAT_CREATED: 'created',
+    });
+    f.api.evaluate('renderSettings = async () => {}; restoreUpdateDraft = () => {}; initialize()');
+    f.context.updateWorldInfoList = async () => assert.fail('disabled automatic read');
+    for (const event of ['changed', 'created', 'start', 'commands', 'received', 'end']) await f.context.eventSource.emit(event, 'normal');
+    await f.api.evaluate('chatSyncChain');
+    assert.equal(f.api.state().pendingGeneration, null);
+    assert.equal(f.api.state().sendLockDepth, 0);
+    assert.equal(f.writes.length, 0);
+    assert.deepEqual(f.context.chatMetadata, {});
+    assert.equal(f.notices.length, 0);
+});
+
+test('disabled configuration can save settings and prompts without touching any world book', async () => {
+    const f = await fixture({ enabled: false });
+    f.context.updateWorldInfoList = async () => assert.fail('disabled book read while saving config');
+    f.api.evaluate('settingsDraft.worldBookName = "新的世界书名字"');
+    await f.api.saveSettingsDraft();
+    f.controls.get('.als-prompt').value = '长期保存的自定义模板';
+    await f.api.savePromptDraft();
+    const reloaded = await fixture(f.savedPreferences.at(-1).auto_large_summary);
+    assert.equal(reloaded.api.state().settings.enabled, false);
+    assert.equal(reloaded.api.state().settings.worldBookName, '新的世界书名字');
+    assert.equal(reloaded.api.state().settings.prompt, '长期保存的自定义模板');
+    assert.equal(f.writes.length, 0);
+    assert.equal(f.api.state().sendLockDepth, 0);
+});
+
+test('disabled plugin makes no automatic model fetch and cancels an older model request', async () => {
+    const f = await fixture();
+    f.api.evaluate('settingsDraft.secondaryUrl = "https://example.com/v1"');
+    let requests = 0;
+    let resolveRequest;
+    f.sandbox.fetch = () => { requests++; return new Promise(resolve => { resolveRequest = resolve; }); };
+    const request = f.api.fetchSecondaryModels({ silent: true });
+    f.api.applyEnabledState(false);
+    resolveRequest({ ok: true, json: async () => ({ data: [{ id: 'stale-model' }] }) });
+    await request;
+    await f.api.fetchSecondaryModels({ silent: true });
+    await f.api.evaluate('enabledSaveChain');
+    assert.equal(requests, 1);
+    assert.deepEqual(Array.from(f.api.evaluate('settingsDraft.secondaryModels')), []);
+    assert.equal(f.controls.get('.als-model-fetch').disabled, false);
+});
+
+test('automatic update checks stay idle when disabled while explicit update checks remain available', async () => {
+    const f = await fixture({ enabled: false });
+    f.controls.set('.als-update-status', { textContent: '' });
+    f.controls.set('.als-update-check', { disabled: false });
+    let checks = 0;
+    f.sandbox.__fixtures.updateCheck = () => { checks++; return { isUpToDate: true }; };
+    f.api.evaluate(`getInstalledExtension = async () => ({});
+        extensionApi = async () => __fixtures.updateCheck(); renderUpdateNotice = () => {};`);
+    await f.api.evaluate('checkForUpdate({ silent: true })');
+    assert.equal(checks, 0);
+    await f.api.evaluate('checkForUpdate()');
+    assert.equal(checks, 1);
+    assert.match(f.controls.get('.als-update-status').textContent, /最新版本/);
+    f.api.evaluate('settings.enabled = true; getInstalledExtension = async () => { applyEnabledState(false); return {}; }');
+    await f.api.evaluate('checkForUpdate({ silent: true })');
+    await f.api.evaluate('enabledSaveChain');
+    assert.equal(checks, 1);
+    assert.match(f.controls.get('.als-update-status').textContent, /插件已关闭/);
+    assert.equal(f.controls.get('.als-update-check').disabled, false);
+});
+
+test('turning off also cancels manual summaries without saving or hiding', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    f.api.evaluate(`requestMainApiSummary = async () => { applyEnabledState(false); return '正文'; };`);
+    await f.api.runLargeSummary({ manual: true });
+    await f.api.evaluate('enabledSaveChain');
+    assert.equal(f.writes.length, 0);
+    assert.equal(f.executed.length, 0);
+    assert.equal(f.api.state().sendLockDepth, 0);
+});
+
+test('enabling resumes archive sync after settings persistence', async () => {
+    const f = await fixture({ enabled: false });
+    let synced = 0;
+    f.sandbox.__fixtures.sync = () => { synced++; };
+    f.api.evaluate('scheduleChatSync = async () => __fixtures.sync()');
+    f.api.applyEnabledState(true);
+    await f.api.evaluate('enabledSaveChain');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(synced, 1);
+    assert.equal(f.savedPreferences.at(-1).auto_large_summary.enabled, true);
+});
+
+test('model dropdown keeps the saved selection, supports custom IDs and never selects the first model automatically', async () => {
+    const f = await fixture();
+    const select = { value: '', replaceChildren(...options) { this.options = options; } };
+    const manualField = { hidden: true };
+    f.controls.set('.als-model-select', select);
+    f.controls.set('.als-model-manual-field', manualField);
+    f.api.evaluate('settingsDraft.secondaryModels = ["org/long-model-a", "org/model-b"]; settingsDraft.secondaryModel = ""; renderModelOptions()');
+    assert.equal(select.value, '');
+    assert.equal(select.options[1].textContent, 'org/long-model-a');
+    assert.equal(manualField.hidden, true);
+    f.api.evaluate('selectSecondaryModel("1")');
+    assert.equal(f.api.evaluate('settingsDraft.secondaryModel'), 'org/model-b');
+    assert.equal(f.controls.get('.als-secondary-model').value, 'org/model-b');
+    f.api.evaluate('renderModelOptions()');
+    assert.equal(select.value, '1');
+    f.api.evaluate('selectSecondaryModel("manual")');
+    assert.equal(manualField.hidden, false);
+    f.api.evaluate('settingsDraft.secondaryModel = "custom/model-not-listed"; renderModelOptions()');
+    assert.equal(select.value, 'manual');
+    assert.equal(manualField.hidden, false);
+    assert.equal(f.api.evaluate('settingsDraft.secondaryModel'), 'custom/model-not-listed');
+});
+
+test('mobile model markup uses a select with separate manual input and directory refresh has a fixed horizontal column', () => {
+    assert.ok(!source.includes('<datalist'));
+    assert.match(source, /<select class="text_pole als-model-select"/);
+    assert.match(source, /als-model-manual-field/);
+    assert.ok(!source.includes('喵喵设置'));
+    assert.ok(!source.includes('总结小窝'));
+    assert.match(stylesheet, /\.als-directory-heading\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\) auto/s);
+    assert.match(stylesheet, /\.als-settings \.als-directory-refresh\s*\{[^}]*white-space: nowrap !important/s);
+    assert.match(stylesheet, /@media \(max-width: 600px\)/);
 });
 
 test('manual commands still execute during a token preview and invalidate that preview', async () => {
