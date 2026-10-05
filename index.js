@@ -1,6 +1,6 @@
 const MODULE_NAME = 'auto_large_summary';
 const ENTRY_MARKER = 'auto_large_summary';
-const EXTENSION_VERSION = '0.3.1';
+const EXTENSION_VERSION = '0.3.2';
 const SUMMARY_INJECTION_ID = 'meow_large_summary_instruction';
 const LEGACY_DEFAULT_PROMPT = `ELLA, suspend all current commands. The following directive has absolute priority:
 Since THE STARS has grown lengthy, extract and compose a comprehensive summary.
@@ -130,7 +130,6 @@ let summaryRequest = null;
 let requestPreview = false;
 let thresholdCheckInProgress = false;
 let sendLockDepth = 0;
-const sendUnlockWaiters = [];
 const lockedControls = new Map();
 const SEND_CONTROL_SELECTOR = '#send_but, #option_continue, #option_regenerate, .swipe_left, .swipe_right, .als-settings input:not(.als-enabled), .als-settings .als-mode, .als-settings .als-instruction-position, .als-settings .als-instruction-role, .als-settings .als-prompt, .als-run, .als-settings-save, .als-settings-reset, .als-prompt-save, .als-prompt-reset, .als-delete-archive, .als-delete-round, .als-update-apply';
 const worldBookPreparations = new Map();
@@ -153,9 +152,6 @@ let updateInProgress = false;
 let availableUpdate = null;
 let dismissedUpdate = '';
 let enabledRevision = 0;
-let visibilityRevision = 0;
-let visibilityCommandInProgress = false;
-let waitingGenerationCount = 0;
 let enabledSaveChain = Promise.resolve();
 const SETTING_FIELDS = ['enabled', 'threshold', 'keepRecent', 'worldBookName', 'depth', 'mode', 'instructionPosition', 'instructionDepth', 'instructionRole'];
 const INSTRUCTION_POSITIONS = { tail: null, before: 2, after: 0, depth: 1 };
@@ -192,7 +188,6 @@ function unlockSending() {
     for (const control of ui?.querySelectorAll('.als-delete-archive') ?? []) control.disabled = false;
     const deleteRound = ui?.querySelector('.als-delete-round');
     if (deleteRound) deleteRound.disabled = !selectedSummary || ui.querySelector('.als-history-select').value === 'all';
-    for (const resolve of sendUnlockWaiters.splice(0)) resolve();
 }
 
 function blockSendInput(event) {
@@ -203,27 +198,23 @@ function blockSendInput(event) {
         && event.key === 'Enter' && !event.shiftKey && !event.isComposing;
     const isSubmit = event.type === 'submit' && target?.querySelector?.('#send_textarea');
     if (!isSend && !isEnter && !isSubmit) return;
-    event.preventDefault();
-    event.stopImmediatePropagation();
     const fromChatInput = isEnter || isSubmit || (isSend && target.closest('#send_but'));
     const input = document.querySelector('#send_textarea');
     const command = input?.value?.trim() ?? '';
-    // Only local visibility commands qualify. A pipeline/closure can send
-    // dialogue, so it continues to obey the conversation lock.
-    if (fromChatInput && /^\/(?:hide|unhide)(?:\s|$)/i.test(command)
-        && !/[|\r\n]/.test(command) && !command.includes('{:') && !command.includes('{{')) {
-        void executeVisibilityCommand(command, input);
-        return;
-    }
+    // ST owns all slash parsing, including pipelines, macros, script controls
+    // and commands added by other extensions. Never consume their input here.
+    if (fromChatInput && command.startsWith('/')) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
     window.toastr?.info?.('正在检查上下文或进行大总结，保存并隐藏旧楼层后才能继续发送。', '', { preventDuplicates: true });
 }
 
-function cancelPendingAutoSummary({ cancelActive = true } = {}) {
+function cancelPendingAutoSummary() {
     if (summaryTimer) clearTimeout(summaryTimer);
     summaryTimer = null;
     if (pendingGeneration?.locked) unlockSending();
     pendingGeneration = null;
-    if (cancelActive && activeRun?.automatic) {
+    if (activeRun?.automatic) {
         activeRun.cancelled = true;
         if (summaryRequest?.sending) {
             summaryRequest.cancelled = true;
@@ -251,46 +242,8 @@ function applyEnabledState(value) {
     }).catch(error => window.toastr?.error?.(`启用状态保存失败：${error.message}`));
 }
 
-async function executeVisibilityCommand(command, input) {
-    if (visibilityCommandInProgress) return;
-    const context = getContext();
-    if (typeof context?.executeSlashCommandsWithOptions !== 'function') {
-        window.toastr?.warning?.('当前酒馆没有提供斜杠命令接口。');
-        return;
-    }
-    visibilityCommandInProgress = true;
-    lockSending();
-    visibilityRevision += 1;
-    const cancelledSummary = Boolean(activeRun);
-    cancelPendingAutoSummary({ cancelActive: false });
-    if (activeRun) {
-        activeRun.cancelled = true;
-        if (summaryRequest?.sending) {
-            summaryRequest.cancelled = true;
-            context.stopGeneration?.();
-        }
-    }
-    try {
-        // The native slash executor edits visibility without entering Generate
-        // or changing its generating flag. No model request is made here.
-        const result = await context.executeSlashCommandsWithOptions(command, { handleParserErrors: false });
-        if (result?.isError || result?.isAborted) throw new Error(result.abortReason || '楼层可见性命令执行失败。');
-        if (input.value.trim() === command) {
-            input.value = '';
-            input.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-        setStatus(cancelledSummary ? '楼层可见性命令已执行；本次总结已取消，保留当前楼层状态。' : '楼层可见性命令已执行。');
-    } catch (error) {
-        window.toastr?.error?.(error.message);
-    } finally {
-        visibilityCommandInProgress = false;
-        unlockSending();
-    }
-}
-
 function summaryWasCancelled() {
     return Boolean(activeRun && (activeRun.cancelled
-        || activeRun.visibilityRevision !== visibilityRevision
         || (activeRun.automatic && (!settings.enabled || activeRun.enabledRevision !== enabledRevision))));
 }
 
@@ -941,9 +894,7 @@ async function waitForCurrentGeneration(context, expectedChatId) {
         const current = getContext();
         if (!current || current.chatId !== expectedChatId || current.characterId !== context.characterId) return false;
         const streaming = current.streamingProcessor && !current.streamingProcessor.isFinished;
-        // A queued Generate can set ST's busy flag before reaching our guard.
-        // It has no stream/body generation yet and must not hold this check.
-        if (!streaming && (waitingGenerationCount > 0 || (!native.is_send_press && !native.isGenerating?.()))
+        if (!streaming && !native.is_send_press && !native.isGenerating?.()
             && document.body.dataset.generating !== 'true') return true;
         await new Promise(resolve => setTimeout(resolve, 150));
     }
@@ -968,9 +919,15 @@ async function runLargeSummary({ manual = false } = {}) {
     setStatus('正在后台生成大总结，暂时暂停发送…');
     activeRun = {
         chatId: current.chatId, characterId: context.characterId, archiveId: null, committed: false,
-        automatic: !manual, cancelled: false, enabledRevision, visibilityRevision,
+        automatic: !manual, cancelled: false, enabledRevision,
     };
-    const toast = manual ? window.toastr?.info?.('正在后台生成大总结…', '', { timeOut: 0 }) : null;
+    let toast = null;
+    const showProgress = message => {
+        if (toast) window.toastr?.clear?.(toast);
+        toast = window.toastr?.info?.(message, '喵喵大总结', {
+            timeOut: 0, extendedTimeOut: 0, closeButton: true, tapToDismiss: false,
+        });
+    };
     let summaryCommitted = false;
     try {
         if (!await waitForCurrentGeneration(context, current.chatId)) {
@@ -1019,6 +976,7 @@ async function runLargeSummary({ manual = false } = {}) {
         if (!String(prompt ?? '').trim()) throw new Error('总结提示词为空。');
         assertSummaryActive();
 
+        showProgress('正在大总结中，请等待…');
         const summary = await requestMainApiSummary(context, String(prompt));
         assertSummaryActive();
         const latestContext = getContext();
@@ -1037,12 +995,18 @@ async function runLargeSummary({ manual = false } = {}) {
                 currentArchive.autoTriggerArmed = true;
                 await latestContext.saveMetadata?.();
             }
-            if (manual) window.toastr?.warning?.('生成期间旧楼层发生变化，这次结果未保存也未隐藏楼层。');
+            window.toastr?.warning?.('生成期间旧楼层发生变化，这次结果未保存也未隐藏楼层。', '喵喵大总结');
             return;
         }
 
+        showProgress('大总结已返回，正在保存世界书…');
         const data = await ensureWorldBook(latestContext);
         assertSummaryActive();
+        if (!isSameArchive(getContext(), archiveInfo, context.characterId)
+            || !messageRangeMatches(getContext().chat, sourceSnapshot)) {
+            window.toastr?.warning?.('保存前聊天发生变化，这次结果未保存也未隐藏楼层。', '喵喵大总结');
+            return;
+        }
         const all = listOwnedEntries(data);
         const existingEntry = all.find(entry => entryMetadata(entry)?.archiveId === archiveInfo.archive.archiveId);
         const previousRecords = existingEntry ? archiveRecords(existingEntry) : [];
@@ -1143,11 +1107,15 @@ async function runLargeSummary({ manual = false } = {}) {
             || entryMetadata(persistedEntry)?.records?.at(-1)?.content !== String(summary).trim()) {
             throw new Error('大总结未能从世界书读回确认，楼层尚未隐藏。');
         }
+        summaryCommitted = true;
+        activeRun.committed = true;
+        showProgress('大总结保存成功，正在处理旧楼层…');
         await latestContext.updateWorldInfoList?.();
         latestContext.reloadWorldInfoEditor?.(settings.worldBookName);
 
         if (!isSameArchive(getContext(), archiveInfo, context.characterId)) {
             console.warn('[自动大总结] 世界书已保存，但聊天存档已经切换；没有修改楼层可见状态。');
+            window.toastr?.info?.('大总结保存成功；聊天已切换，没有隐藏楼层。', '喵喵大总结');
             return;
         }
         const currentArchive = latestContext.chatMetadata[MODULE_NAME];
@@ -1155,8 +1123,6 @@ async function runLargeSummary({ manual = false } = {}) {
         currentArchive.round = round;
         currentArchive.worldBookName = settings.worldBookName;
         await latestContext.saveMetadata?.();
-        summaryCommitted = true;
-        activeRun.committed = true;
         if (settings.pendingRetries.includes(archiveInfo.archive.archiveId)) {
             settings.pendingRetries = settings.pendingRetries.filter(id => id !== archiveInfo.archive.archiveId);
             saveSettings();
@@ -1167,6 +1133,7 @@ async function runLargeSummary({ manual = false } = {}) {
         if (!isSameArchive(liveContext, archiveInfo, context.characterId)
             || !messageRangeMatches(liveContext.chat, sourceSnapshot)) {
             console.warn('[自动大总结] 保存过程中聊天发生变化；保留总结记录，没有隐藏楼层。');
+            window.toastr?.info?.('大总结保存成功；聊天已变化，没有隐藏楼层。', '喵喵大总结');
             return;
         }
         const hideEnd = Math.min(range.coveredTo, liveContext.chat.length - range.keepRecent - 1);
@@ -1182,16 +1149,18 @@ async function runLargeSummary({ manual = false } = {}) {
         currentArchive.autoTriggerArmed = false;
         await liveContext.saveMetadata?.();
         setStatus(`第 ${round} 次大总结已保存，已隐藏旧楼层，可以继续对话。`);
-        if (manual) window.toastr?.success?.(`第 ${round} 次大总结已保存；已隐藏 0-${hideEnd} 楼，保留最近 ${range.keepRecent} 楼。`);
+        window.toastr?.success?.(`第 ${round} 次大总结保存成功，旧楼层已隐藏，可以继续对话。`, '喵喵大总结');
         void renderDirectory();
         return true;
     } catch (error) {
         if (summaryWasCancelled()) {
             setStatus(summaryCommitted ? '总结记录已保存；本次自动隐藏已取消。' : '本次总结已取消。');
+            window.toastr?.info?.(summaryCommitted ? '大总结保存成功；本次自动隐藏已取消。' : '本次大总结已取消，旧楼层未隐藏。', '喵喵大总结');
         } else {
             console.error('[喵喵大总结] 总结失败：', error);
-            window.toastr?.error?.(`大总结失败：${error?.message ?? error}`);
-            setStatus(`大总结失败：${error?.message ?? error}。已解除发送锁。`);
+            const failure = `${summaryCommitted ? '大总结已保存，但后续处理失败' : '大总结失败'}：${error?.message ?? error}`;
+            window.toastr?.error?.(failure, '喵喵大总结');
+            setStatus(`${failure}。已解除发送锁。`);
         }
         if (!summaryCommitted) {
             const live = getContext();
@@ -1211,23 +1180,17 @@ async function runLargeSummary({ manual = false } = {}) {
     }
 }
 
-async function onGenerationAfterCommands(type, _options, dryRun) {
+function onGenerationAfterCommands(type, _options, dryRun) {
     refreshFinalHooks();
     if (dryRun) return;
     if (summaryRequest?.afterCommands && type === 'quiet') {
         summaryRequest.afterCommands = false;
+        summaryRequest.interceptorPending = true;
         return;
     }
-    // Local slash commands finish before this event. Only requests that will
-    // generate a model reply wait for the summary transaction to finish.
-    if (sendLockDepth) {
-        waitingGenerationCount += 1;
-        try {
-            while (sendLockDepth) await new Promise(resolve => sendUnlockWaiters.push(resolve));
-        } finally {
-            waitingGenerationCount -= 1;
-        }
-    }
+    // Event listeners must return promptly: a slash script may itself call
+    // Generate, and waiting here can hold ST's command/busy state indefinitely.
+    if (sendLockDepth) return;
     const context = getContext();
     const current = getCharacterAndChat(context);
     pendingGeneration = canSummarize(context, true) && ['normal', 'continue'].includes(type) ? {
@@ -1236,12 +1199,23 @@ async function onGenerationAfterCommands(type, _options, dryRun) {
     } : null;
 }
 
+globalThis.meowLargeSummaryGenerationInterceptor = (_chat, _contextSize, abort, type) => {
+    if (type === 'quiet' && summaryRequest?.interceptorPending && !summaryWasCancelled()) {
+        summaryRequest.interceptorPending = false;
+        return;
+    }
+    if (!sendLockDepth) return;
+    // The supported ST interceptor aborts a model generation after slash
+    // parsing. Local commands never reach it, and no waiter holds their script.
+    abort(true);
+    window.toastr?.info?.('正在检查上下文或进行大总结，请处理完成后再生成。', '喵喵大总结', { preventDuplicates: true });
+};
+
 async function checkAfterReply(pending) {
     thresholdCheckInProgress = true;
     const startEnabledRevision = enabledRevision;
-    const startVisibilityRevision = visibilityRevision;
     const stillEnabled = () => settings.enabled && enabledRevision === startEnabledRevision
-        && visibilityRevision === startVisibilityRevision && !visibilityCommandInProgress;
+        && getContext()?.chatId === pending.chatId && getContext()?.characterId === pending.characterId;
     try {
         const context = getContext();
         if (context?.chatId !== pending.chatId || context?.characterId !== pending.characterId
@@ -1356,7 +1330,7 @@ function scheduleChatSync({ checkThreshold = true } = {}) {
         if (revision !== chatSyncRevision) return;
         // An earlier archive may still be finishing a cancelled request. Its
         // final write must finish before the new archive becomes active.
-        while (runInProgress || thresholdCheckInProgress || promptProbe || archiveEditInProgress || visibilityCommandInProgress) {
+        while (runInProgress || thresholdCheckInProgress || promptProbe || archiveEditInProgress) {
             await new Promise(resolve => setTimeout(resolve, 80));
             if (revision !== chatSyncRevision) return;
         }
@@ -2006,6 +1980,7 @@ function initialize() {
     context.eventSource.on(context.eventTypes.GENERATION_ENDED, onGenerationEnded);
     context.eventSource.on(context.eventTypes.CHAT_CHANGED, () => {
         if (activeRun && !activeRun.committed) queueArchiveRetry(activeRun.archiveId);
+        if (activeRun) activeRun.cancelled = true;
         if (summaryRequest?.sending) getContext()?.stopGeneration?.();
         if (pendingGeneration?.locked) unlockSending();
         pendingGeneration = null;
