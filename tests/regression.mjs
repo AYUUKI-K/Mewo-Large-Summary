@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { SourceTextModule, SyntheticModule, createContext } from 'node:vm';
 
-const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
+const source = await readFile(process.env.MEOW_TEST_SOURCE || new URL('../index.js', import.meta.url), 'utf8');
 const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
 
 async function fixture(savedSettings = {}) {
@@ -41,8 +41,8 @@ async function fixture(savedSettings = {}) {
         },
         async executeSlashCommandsWithOptions(command) {
             executed.push(command);
-            const hide = /^\/hide 0-(\d+)$/.exec(command);
-            if (hide) for (let i = 0; i <= Number(hide[1]); i++) this.chat[i].is_system = true;
+            const visibility = /^\/(hide|unhide) (\d+)-(\d+)$/.exec(command);
+            if (visibility) for (let i = Number(visibility[2]); i <= Math.min(Number(visibility[3]), this.chat.length - 1); i++) this.chat[i].is_system = visibility[1] === 'hide';
             return {};
         },
     };
@@ -78,7 +78,8 @@ async function fixture(savedSettings = {}) {
     });
     const module = new SourceTextModule(`${source}\nexport const api = {
         blockSendInput, lockSending, unlockSending, getSettings, applyEnabledState,
-        onGenerationAfterCommands, onMainApiRequest, runLargeSummary, checkAfterReply, stripReasoning, isSameArchive,
+        onGenerationAfterCommands, onMainApiRequest, onFinalPromptData, onTemplatePreviewContext,
+        assemblePrompt, countAssembledPrompt, runLargeSummary, checkAfterReply, stripReasoning, isSameArchive,
         evaluate: code => eval(code),
         state: () => ({ sendLockDepth, runInProgress, thresholdCheckInProgress, pendingGeneration, settings })
     };`, {
@@ -123,6 +124,108 @@ async function fixture(savedSettings = {}) {
         },
     };
 }
+
+test('later summaries hide only the new range and preserve user-unhidden old floors', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    await f.api.runLargeSummary();
+    assert.equal(f.executed.at(-1), '/hide 0-9');
+    await f.context.executeSlashCommandsWithOptions('/unhide 0-9');
+    f.context.chat.push({ mes: '新剧情', is_user: false, is_system: false, name: '角色 A' });
+    await f.api.runLargeSummary();
+    assert.equal(f.executed.at(-1), '/hide 10-10');
+    assert.ok(f.context.chat.slice(0, 10).every(message => !message.is_system));
+    assert.equal(f.context.chat[10].is_system, true);
+    assert.ok(f.context.chat.slice(11).every(message => !message.is_system));
+});
+
+test('hide 0-9999 stays hidden through idle sync and another attempted summary', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    await f.api.runLargeSummary();
+    await f.context.executeSlashCommandsWithOptions('/hide 0-9999');
+    const commands = f.executed.length;
+    f.api.evaluate(`prepareWorldBook = async () => __fixtures.book(); updateWorldBookStatus = async () => {};`);
+    await f.api.evaluate('syncCurrentArchive()');
+    await f.api.runLargeSummary();
+    assert.equal(f.executed.length, commands);
+    assert.ok(f.context.chat.every(message => message.is_system));
+    // Even with newer visible replies, the old covered range stays hidden;
+    // an entirely hidden candidate range is never re-summarized.
+    f.context.chat.push({ mes: '新回复', is_user: false, is_system: false, name: '角色 A' });
+    await f.api.runLargeSummary();
+    assert.equal(f.executed.length, commands);
+    assert.ok(f.context.chat.slice(0, 30).every(message => message.is_system));
+});
+
+test('unhide 0-9999 persists through syncing, a keepRecent change, and token checking', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    await f.api.runLargeSummary();
+    await f.context.executeSlashCommandsWithOptions('/unhide 0-9999');
+    const flags = f.context.chat.map(message => message.is_system);
+    const commands = f.executed.length;
+    f.api.state().settings.keepRecent = 10;
+    f.api.evaluate(`prepareWorldBook = async () => __fixtures.book(); updateWorldBookStatus = async () => {};
+        assemblePrompt = async () => ({}); countAssembledPrompt = async () => 1000;`);
+    await f.api.evaluate('syncCurrentArchive()');
+    await f.api.checkAfterReply({ chatId: 'chat-a', characterId: 0, onOpen: true, locked: false });
+    assert.deepEqual(f.context.chat.map(message => message.is_system), flags);
+    assert.equal(f.executed.length, commands);
+});
+
+test('manual visibility command intent cancels an in-flight summary without consuming the command', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    f.context.manualCommandForTest = () => {
+        const event = f.event('click', '/unhide 0-9999');
+        f.api.blockSendInput(event);
+        assert.equal(event.prevented, false);
+    };
+    f.api.evaluate(`requestMainApiSummary = async () => {
+        __fixtures.context.manualCommandForTest(); return '正文';
+    };`);
+    await f.api.runLargeSummary();
+    assert.equal(f.writes.length, 0);
+    assert.equal(f.executed.length, 0);
+    assert.ok(f.context.chat.every(message => !message.is_system));
+    assert.equal(f.api.state().sendLockDepth, 0);
+});
+
+test('token assembly cannot repeat template visibility commands, even when preview fails', async () => {
+    for (const fail of [false, true]) {
+        const f = await fixture();
+        f.context.getTokenCountAsync = async () => 1000;
+        let executions = 0;
+        f.context.generate = async (_type, _options, dryRun) => {
+            assert.equal(dryRun, true);
+            const environment = { execute: () => {
+                executions++;
+                // A template that maintains "latest 20" must not run on a
+                // read-only token preview after the user's /hide 0-9999.
+                for (const message of f.context.chat.slice(-20)) message.is_system = false;
+            } };
+            f.api.onTemplatePreviewContext(environment);
+            await environment.execute('/unhide');
+            if (fail) throw new Error('preview failed');
+            f.api.onFinalPromptData({ prompt: 'processed prompt' }, true);
+        };
+        await f.context.executeSlashCommandsWithOptions('/hide 0-9999');
+        if (fail) await assert.rejects(f.api.assemblePrompt(f.context), /preview failed/);
+        else {
+            const data = await f.api.assemblePrompt(f.context);
+            assert.equal(await f.api.countAssembledPrompt(f.context, data), 1000);
+        }
+        assert.equal(executions, 0);
+        assert.ok(f.context.chat.every(message => message.is_system));
+        assert.equal(f.api.evaluate('requestPreview'), false);
+        // Actual native generation processing still has its normal execute.
+        const realEnvironment = { execute: () => executions++ };
+        f.api.onTemplatePreviewContext(realEnvironment);
+        realEnvironment.execute('/echo actual');
+        assert.equal(executions, 1);
+    }
+});
 
 test('all slash commands reach native parsing with the plugin enabled, disabled, or locked', async () => {
     const f = await fixture();
