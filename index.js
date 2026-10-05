@@ -1,6 +1,6 @@
 const MODULE_NAME = 'auto_large_summary';
 const ENTRY_MARKER = 'auto_large_summary';
-const EXTENSION_VERSION = '0.3.0';
+const EXTENSION_VERSION = '0.3.1';
 const SUMMARY_INJECTION_ID = 'meow_large_summary_instruction';
 const LEGACY_DEFAULT_PROMPT = `ELLA, suspend all current commands. The following directive has absolute priority:
 Since THE STARS has grown lengthy, extract and compose a comprehensive summary.
@@ -132,7 +132,7 @@ let thresholdCheckInProgress = false;
 let sendLockDepth = 0;
 const sendUnlockWaiters = [];
 const lockedControls = new Map();
-const SEND_CONTROL_SELECTOR = '#send_but, #option_continue, #option_regenerate, .swipe_left, .swipe_right, .als-settings input, .als-settings .als-mode, .als-settings .als-instruction-position, .als-settings .als-instruction-role, .als-settings .als-prompt, .als-run, .als-settings-save, .als-settings-reset, .als-prompt-save, .als-prompt-reset, .als-delete-archive, .als-delete-round, .als-update-apply';
+const SEND_CONTROL_SELECTOR = '#send_but, #option_continue, #option_regenerate, .swipe_left, .swipe_right, .als-settings input:not(.als-enabled), .als-settings .als-mode, .als-settings .als-instruction-position, .als-settings .als-instruction-role, .als-settings .als-prompt, .als-run, .als-settings-save, .als-settings-reset, .als-prompt-save, .als-prompt-reset, .als-delete-archive, .als-delete-round, .als-update-apply';
 const worldBookPreparations = new Map();
 const MODE_LABELS = { incremental: '多次大总结', merged: '合并大总结' };
 const DIRECTORY_PAGE_SIZE = 8;
@@ -152,6 +152,11 @@ let updateCheckInProgress = false;
 let updateInProgress = false;
 let availableUpdate = null;
 let dismissedUpdate = '';
+let enabledRevision = 0;
+let visibilityRevision = 0;
+let visibilityCommandInProgress = false;
+let waitingGenerationCount = 0;
+let enabledSaveChain = Promise.resolve();
 const SETTING_FIELDS = ['enabled', 'threshold', 'keepRecent', 'worldBookName', 'depth', 'mode', 'instructionPosition', 'instructionDepth', 'instructionRole'];
 const INSTRUCTION_POSITIONS = { tail: null, before: 2, after: 0, depth: 1 };
 
@@ -165,6 +170,9 @@ function lockSending() {
     if (sendLockDepth !== 1) return;
     document.body?.classList.add('als-send-locked');
     for (const control of document.querySelectorAll(SEND_CONTROL_SELECTOR)) {
+        // Keep the input's send action usable for local /hide and /unhide.
+        // Conversation sends are blocked in the capture handler below.
+        if (control.id === 'send_but') continue;
         lockedControls.set(control, { disabled: control.disabled, aria: control.getAttribute('aria-disabled') });
         if ('disabled' in control) control.disabled = true;
         control.setAttribute('aria-disabled', 'true');
@@ -197,7 +205,97 @@ function blockSendInput(event) {
     if (!isSend && !isEnter && !isSubmit) return;
     event.preventDefault();
     event.stopImmediatePropagation();
+    const fromChatInput = isEnter || isSubmit || (isSend && target.closest('#send_but'));
+    const input = document.querySelector('#send_textarea');
+    const command = input?.value?.trim() ?? '';
+    // Only local visibility commands qualify. A pipeline/closure can send
+    // dialogue, so it continues to obey the conversation lock.
+    if (fromChatInput && /^\/(?:hide|unhide)(?:\s|$)/i.test(command)
+        && !/[|\r\n]/.test(command) && !command.includes('{:') && !command.includes('{{')) {
+        void executeVisibilityCommand(command, input);
+        return;
+    }
     window.toastr?.info?.('正在检查上下文或进行大总结，保存并隐藏旧楼层后才能继续发送。', '', { preventDuplicates: true });
+}
+
+function cancelPendingAutoSummary({ cancelActive = true } = {}) {
+    if (summaryTimer) clearTimeout(summaryTimer);
+    summaryTimer = null;
+    if (pendingGeneration?.locked) unlockSending();
+    pendingGeneration = null;
+    if (cancelActive && activeRun?.automatic) {
+        activeRun.cancelled = true;
+        if (summaryRequest?.sending) {
+            summaryRequest.cancelled = true;
+            getContext()?.stopGeneration?.();
+        }
+    }
+}
+
+function applyEnabledState(value) {
+    settings.enabled = Boolean(value);
+    settingsDraft.enabled = settings.enabled;
+    const revision = ++enabledRevision;
+    if (!settings.enabled) {
+        cancelPendingAutoSummary();
+        setStatus('自动总结已关闭。');
+    }
+    saveSettings();
+    syncSettingsState();
+    // Serialize immediate saves so rapid on/off toggles cannot leave an older
+    // setting as the last server write. No other settings drafts are applied.
+    enabledSaveChain = enabledSaveChain.catch(() => {}).then(async () => {
+        const native = await import('/script.js');
+        if (typeof native.saveSettings === 'function') await native.saveSettings();
+        if (revision === enabledRevision && settings.enabled) void scheduleChatSync();
+    }).catch(error => window.toastr?.error?.(`启用状态保存失败：${error.message}`));
+}
+
+async function executeVisibilityCommand(command, input) {
+    if (visibilityCommandInProgress) return;
+    const context = getContext();
+    if (typeof context?.executeSlashCommandsWithOptions !== 'function') {
+        window.toastr?.warning?.('当前酒馆没有提供斜杠命令接口。');
+        return;
+    }
+    visibilityCommandInProgress = true;
+    lockSending();
+    visibilityRevision += 1;
+    const cancelledSummary = Boolean(activeRun);
+    cancelPendingAutoSummary({ cancelActive: false });
+    if (activeRun) {
+        activeRun.cancelled = true;
+        if (summaryRequest?.sending) {
+            summaryRequest.cancelled = true;
+            context.stopGeneration?.();
+        }
+    }
+    try {
+        // The native slash executor edits visibility without entering Generate
+        // or changing its generating flag. No model request is made here.
+        const result = await context.executeSlashCommandsWithOptions(command, { handleParserErrors: false });
+        if (result?.isError || result?.isAborted) throw new Error(result.abortReason || '楼层可见性命令执行失败。');
+        if (input.value.trim() === command) {
+            input.value = '';
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        setStatus(cancelledSummary ? '楼层可见性命令已执行；本次总结已取消，保留当前楼层状态。' : '楼层可见性命令已执行。');
+    } catch (error) {
+        window.toastr?.error?.(error.message);
+    } finally {
+        visibilityCommandInProgress = false;
+        unlockSending();
+    }
+}
+
+function summaryWasCancelled() {
+    return Boolean(activeRun && (activeRun.cancelled
+        || activeRun.visibilityRevision !== visibilityRevision
+        || (activeRun.automatic && (!settings.enabled || activeRun.enabledRevision !== enabledRevision))));
+}
+
+function assertSummaryActive() {
+    if (summaryWasCancelled()) throw new Error('本次总结已取消。');
 }
 
 // The default tail is applied after preset/EJS assembly. Other positions use
@@ -214,7 +312,7 @@ function appendSummaryTail(messages) {
 
 function onFinalPromptData(data, dryRun) {
     if (!dryRun && summaryRequest?.native) {
-        if (!isSameArchive(getContext(), summaryRequest.archiveInfo, summaryRequest.characterId)) {
+        if (summaryWasCancelled() || !isSameArchive(getContext(), summaryRequest.archiveInfo, summaryRequest.characterId)) {
             summaryRequest.cancelled = true;
             getContext()?.stopGeneration?.();
             return;
@@ -234,7 +332,7 @@ function onFinalPromptData(data, dryRun) {
 
 function onMainApiRequest(data) {
     if (summaryRequest?.sending && data.type === 'quiet' && Array.isArray(data.messages)) {
-        if (!isSameArchive(getContext(), summaryRequest.archiveInfo, summaryRequest.characterId)) {
+        if (summaryWasCancelled() || !isSameArchive(getContext(), summaryRequest.archiveInfo, summaryRequest.characterId)) {
             summaryRequest.cancelled = true;
             getContext()?.stopGeneration?.();
             return;
@@ -391,9 +489,10 @@ function stripReasoning(text, template = getContext()?.powerUserSettings?.reason
 async function requestMainApiSummary(context, prompt) {
     if (typeof context.generate !== 'function') throw new Error('当前酒馆缺少后台生成接口。');
     const archiveInfo = await ensureArchive(context);
+    assertSummaryActive();
     const request = {
         prompt, position: settings.instructionPosition, archiveInfo, characterId: context.characterId,
-        tailMessages: new WeakSet(), native: true, starting: true, sending: true, sent: false,
+        tailMessages: new WeakSet(), native: true, afterCommands: true, sending: true, sent: false,
         expectedBody: null, rawText: null, cancelled: false,
     };
     summaryRequest = request;
@@ -436,6 +535,7 @@ async function requestMainApiSummary(context, prompt) {
         // Use the actual quiet generation flow: regex, world info, extension
         // interceptors, EJS conditions, presets and current main API all run.
         const response = await context.generate('quiet', {}, false);
+        assertSummaryActive();
         if (request.cancelled || !isSameArchive(getContext(), archiveInfo, context.characterId)) {
             throw new Error('生成期间聊天存档已切换，本次总结已取消。');
         }
@@ -841,7 +941,9 @@ async function waitForCurrentGeneration(context, expectedChatId) {
         const current = getContext();
         if (!current || current.chatId !== expectedChatId || current.characterId !== context.characterId) return false;
         const streaming = current.streamingProcessor && !current.streamingProcessor.isFinished;
-        if (!streaming && !native.is_send_press && !native.isGenerating?.()
+        // A queued Generate can set ST's busy flag before reaching our guard.
+        // It has no stream/body generation yet and must not hold this check.
+        if (!streaming && (waitingGenerationCount > 0 || (!native.is_send_press && !native.isGenerating?.()))
             && document.body.dataset.generating !== 'true') return true;
         await new Promise(resolve => setTimeout(resolve, 150));
     }
@@ -856,7 +958,7 @@ async function runLargeSummary({ manual = false } = {}) {
         if (manual) window.toastr?.warning?.('请先打开一个角色卡的聊天存档。');
         return;
     }
-    if (!canSummarize(context)) {
+    if (!canSummarize(context, !manual)) {
         if (manual) window.toastr?.warning?.('请填写总结提示词。');
         return;
     }
@@ -864,7 +966,10 @@ async function runLargeSummary({ manual = false } = {}) {
     runInProgress = true;
     lockSending();
     setStatus('正在后台生成大总结，暂时暂停发送…');
-    activeRun = { chatId: current.chatId, characterId: context.characterId, archiveId: null, committed: false };
+    activeRun = {
+        chatId: current.chatId, characterId: context.characterId, archiveId: null, committed: false,
+        automatic: !manual, cancelled: false, enabledRevision, visibilityRevision,
+    };
     const toast = manual ? window.toastr?.info?.('正在后台生成大总结…', '', { timeOut: 0 }) : null;
     let summaryCommitted = false;
     try {
@@ -885,11 +990,13 @@ async function runLargeSummary({ manual = false } = {}) {
             }
             return;
         }
+        assertSummaryActive();
         const archiveInfo = await ensureArchive(context);
         if (!archiveInfo) return;
         activeRun.archiveId = archiveInfo.archive.archiveId;
         await ensureWorldBook(context);
         await setArchiveActivation(archiveInfo.archive.archiveId, { reconcileCursor: true });
+        assertSummaryActive();
         if (!isSameArchive(getContext(), archiveInfo, context.characterId)) {
             queueArchiveRetry(archiveInfo.archive.archiveId);
             return;
@@ -910,8 +1017,10 @@ async function runLargeSummary({ manual = false } = {}) {
             ? await context.substituteParamsExtended(settings.prompt)
             : settings.prompt;
         if (!String(prompt ?? '').trim()) throw new Error('总结提示词为空。');
+        assertSummaryActive();
 
         const summary = await requestMainApiSummary(context, String(prompt));
+        assertSummaryActive();
         const latestContext = getContext();
         const latestIdentity = getCharacterAndChat(latestContext);
         if (!summary || !String(summary).trim()) throw new Error('主 API 返回了空的大总结。');
@@ -933,6 +1042,7 @@ async function runLargeSummary({ manual = false } = {}) {
         }
 
         const data = await ensureWorldBook(latestContext);
+        assertSummaryActive();
         const all = listOwnedEntries(data);
         const existingEntry = all.find(entry => entryMetadata(entry)?.archiveId === archiveInfo.archive.archiveId);
         const previousRecords = existingEntry ? archiveRecords(existingEntry) : [];
@@ -1053,6 +1163,7 @@ async function runLargeSummary({ manual = false } = {}) {
         }
 
         const liveContext = getContext();
+        assertSummaryActive();
         if (!isSameArchive(liveContext, archiveInfo, context.characterId)
             || !messageRangeMatches(liveContext.chat, sourceSnapshot)) {
             console.warn('[自动大总结] 保存过程中聊天发生变化；保留总结记录，没有隐藏楼层。');
@@ -1063,6 +1174,7 @@ async function runLargeSummary({ manual = false } = {}) {
             setStatus('大总结已保存，正在隐藏旧楼层…');
             if (typeof liveContext.executeSlashCommandsWithOptions !== 'function') throw new Error('总结已保存，但酒馆缺少隐藏楼层接口。');
             const result = await liveContext.executeSlashCommandsWithOptions(`/hide 0-${hideEnd}`);
+            assertSummaryActive();
             if (result?.isError || liveContext.chat.slice(0, hideEnd + 1).some(message => !message.is_system)) {
                 throw new Error('总结已保存，但旧楼层未全部隐藏，请检查 /hide 命令。');
             }
@@ -1074,9 +1186,13 @@ async function runLargeSummary({ manual = false } = {}) {
         void renderDirectory();
         return true;
     } catch (error) {
-        console.error('[喵喵大总结] 总结失败：', error);
-        window.toastr?.error?.(`大总结失败：${error?.message ?? error}`);
-        setStatus(`大总结失败：${error?.message ?? error}。已解除发送锁。`);
+        if (summaryWasCancelled()) {
+            setStatus(summaryCommitted ? '总结记录已保存；本次自动隐藏已取消。' : '本次总结已取消。');
+        } else {
+            console.error('[喵喵大总结] 总结失败：', error);
+            window.toastr?.error?.(`大总结失败：${error?.message ?? error}`);
+            setStatus(`大总结失败：${error?.message ?? error}。已解除发送锁。`);
+        }
         if (!summaryCommitted) {
             const live = getContext();
             const currentArchive = live?.chatMetadata?.[MODULE_NAME];
@@ -1095,16 +1211,23 @@ async function runLargeSummary({ manual = false } = {}) {
     }
 }
 
-async function onGenerationStarted(type, _options, dryRun) {
+async function onGenerationAfterCommands(type, _options, dryRun) {
     refreshFinalHooks();
     if (dryRun) return;
-    if (summaryRequest?.starting && type === 'quiet') {
-        summaryRequest.starting = false;
+    if (summaryRequest?.afterCommands && type === 'quiet') {
+        summaryRequest.afterCommands = false;
         return;
     }
-    // ST catches listener exceptions. Waiting here, before ST consumes the
-    // input, also holds slash-command and programmatic generation requests.
-    while (sendLockDepth) await new Promise(resolve => sendUnlockWaiters.push(resolve));
+    // Local slash commands finish before this event. Only requests that will
+    // generate a model reply wait for the summary transaction to finish.
+    if (sendLockDepth) {
+        waitingGenerationCount += 1;
+        try {
+            while (sendLockDepth) await new Promise(resolve => sendUnlockWaiters.push(resolve));
+        } finally {
+            waitingGenerationCount -= 1;
+        }
+    }
     const context = getContext();
     const current = getCharacterAndChat(context);
     pendingGeneration = canSummarize(context, true) && ['normal', 'continue'].includes(type) ? {
@@ -1115,18 +1238,22 @@ async function onGenerationStarted(type, _options, dryRun) {
 
 async function checkAfterReply(pending) {
     thresholdCheckInProgress = true;
+    const startEnabledRevision = enabledRevision;
+    const startVisibilityRevision = visibilityRevision;
+    const stillEnabled = () => settings.enabled && enabledRevision === startEnabledRevision
+        && visibilityRevision === startVisibilityRevision && !visibilityCommandInProgress;
     try {
         const context = getContext();
         if (context?.chatId !== pending.chatId || context?.characterId !== pending.characterId
             || !canSummarize(context, true)) return;
-        if (!await waitForCurrentGeneration(context, pending.chatId)) return;
+        if (!stillEnabled() || !await waitForCurrentGeneration(context, pending.chatId) || !stillEnabled()) return;
         const archiveInfo = await ensureArchive(context);
-        if (!archiveInfo) return;
+        if (!archiveInfo || !stillEnabled()) return;
         const snapshot = captureMessageRange(context.chat, context.chat.length - 1);
         const data = await assemblePrompt(context);
         const count = await countAssembledPrompt(context, data);
         if (!Number.isFinite(count)) throw new Error('酒馆返回了无效的 token 数。');
-        if (!isSameArchive(getContext(), archiveInfo, context.characterId)
+        if (!stillEnabled() || !isSameArchive(getContext(), archiveInfo, context.characterId)
             || !messageRangeMatches(getContext().chat, snapshot)) return;
         const threshold = Math.max(1, Number(settings.threshold) || DEFAULT_SETTINGS.threshold);
         archiveInfo.archive.lastPromptTokens = count;
@@ -1140,16 +1267,18 @@ async function checkAfterReply(pending) {
             || !eligibleUncoveredRange(context, archiveInfo, false)) return;
         archiveInfo.archive.autoTriggerArmed = false;
         await context.saveMetadata?.();
+        if (!stillEnabled()) return;
         const completed = await runLargeSummary();
-        if (completed && isSameArchive(getContext(), archiveInfo, context.characterId)) {
+        if (completed && stillEnabled() && isSameArchive(getContext(), archiveInfo, context.characterId)) {
             const after = await countAssembledPrompt(getContext(), await assemblePrompt(getContext()));
-            if (!isSameArchive(getContext(), archiveInfo, context.characterId)) return;
+            if (!stillEnabled() || !isSameArchive(getContext(), archiveInfo, context.characterId)) return;
             archiveInfo.archive.lastPromptTokens = after;
             archiveInfo.archive.autoTriggerArmed = after < threshold;
             await getContext().saveMetadata?.();
             setStatus(`大总结完成，当前上下文：${after.toLocaleString()} token，可以继续对话。`);
         }
     } catch (error) {
+        if (!stillEnabled()) return;
         console.error('[喵喵大总结] 回复后阈值检查失败：', error);
         setStatus(`阈值检查失败：${error.message}。已解除发送锁。`);
         window.toastr?.error?.(`大总结阈值检查失败：${error.message}`);
@@ -1163,6 +1292,7 @@ async function checkAfterReply(pending) {
 }
 
 function maybeSchedulePending() {
+    if (!settings.enabled) { cancelPendingAutoSummary(); return; }
     if (!pendingGeneration?.received || !pendingGeneration?.ended || summaryTimer) return;
     const pending = pendingGeneration;
     if (!pending.locked) {
@@ -1226,7 +1356,7 @@ function scheduleChatSync({ checkThreshold = true } = {}) {
         if (revision !== chatSyncRevision) return;
         // An earlier archive may still be finishing a cancelled request. Its
         // final write must finish before the new archive becomes active.
-        while (runInProgress || thresholdCheckInProgress || promptProbe || archiveEditInProgress) {
+        while (runInProgress || thresholdCheckInProgress || promptProbe || archiveEditInProgress || visibilityCommandInProgress) {
             await new Promise(resolve => setTimeout(resolve, 80));
             if (revision !== chatSyncRevision) return;
         }
@@ -1536,7 +1666,12 @@ async function saveSettingsDraft() {
             }
         }
         settingsDraft.worldBookName = name;
+        const enabledChanged = settings.enabled !== settingsDraft.enabled;
         Object.assign(settings, settingsDraft);
+        if (enabledChanged) {
+            enabledRevision += 1;
+            if (!settings.enabled) cancelPendingAutoSummary();
+        }
         settings.prompt = settings.prompts[settings.mode];
         saveSettings();
         const { saveSettings: flushSettings } = await import('/script.js');
@@ -1706,6 +1841,7 @@ async function renderSettings() {
           <div class="als-status" role="status" aria-live="polite">打开存档及普通回复结束后检查实际 token。</div>
           <div class="als-panel" id="als-panel-settings" data-panel="settings" role="tabpanel" aria-labelledby="als-tab-settings">
             <label class="als-check"><input class="als-enabled" type="checkbox"><span>启用</span></label>
+            <small class="als-muted">启用开关立即保存；下方设置修改后点击“保存设置”。</small>
             <div class="als-grid">
               <label>触发 token 数<input class="text_pole als-threshold" type="number" min="1" step="1000"></label>
               <label>保留最近楼层<input class="text_pole als-keep" type="number" min="1" step="1"></label>
@@ -1780,7 +1916,7 @@ async function renderSettings() {
     promptEditorMode = settings.mode;
     promptDrafts = { ...settings.prompts };
     populateSettingsDraft();
-    bindInput('.als-enabled', 'enabled', Boolean);
+    ui.querySelector('.als-enabled').addEventListener('change', event => applyEnabledState(event.target.checked));
     bindInput('.als-threshold', 'threshold', value => Math.max(1, Math.floor(Number(value) || DEFAULT_SETTINGS.threshold)));
     bindInput('.als-keep', 'keepRecent', value => Math.max(1, Math.floor(Number(value) || DEFAULT_SETTINGS.keepRecent)));
     bindInput('.als-book', 'worldBookName', value => String(value).trim());
@@ -1861,8 +1997,8 @@ function initialize() {
     document.addEventListener('click', blockSendInput, true);
     document.addEventListener('keydown', blockSendInput, true);
     document.addEventListener('submit', blockSendInput, true);
-    context.eventSource.on(context.eventTypes.GENERATION_STARTED, onGenerationStarted);
-    context.eventSource.on(context.eventTypes.GENERATION_AFTER_COMMANDS, refreshFinalHooks);
+    context.eventSource.on(context.eventTypes.GENERATION_STARTED, refreshFinalHooks);
+    context.eventSource.on(context.eventTypes.GENERATION_AFTER_COMMANDS, onGenerationAfterCommands);
     context.eventSource.on(context.eventTypes.GENERATE_AFTER_DATA, onFinalPromptData);
     context.eventSource.on(context.eventTypes.CHAT_COMPLETION_SETTINGS_READY, onMainApiRequest);
     context.eventSource.on('prompt_template_prepare', onTemplatePreviewContext);
