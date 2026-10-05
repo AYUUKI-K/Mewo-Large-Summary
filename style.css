@@ -6,6 +6,159 @@
     gap: 0.8em;
 }
 
+.als-settings [hidden] {
+    display: none !important;
+}
+
+.als-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    border-bottom: 1px solid var(--SmartThemeBorderColor, #888);
+    margin-bottom: 0.65em;
+}
+
+.als-tab {
+    background: transparent;
+    color: inherit;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    padding: 0.7em 0.15em;
+    cursor: pointer;
+    opacity: 0.65;
+    font: inherit;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.als-tab-active {
+    border-bottom-color: var(--SmartThemeQuoteColor, currentColor);
+    color: var(--SmartThemeQuoteColor, inherit);
+    opacity: 1;
+    font-weight: bold;
+}
+
+.als-tab:focus-visible {
+    outline: 2px solid var(--SmartThemeQuoteColor, currentColor);
+    outline-offset: -2px;
+}
+
+.als-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75em;
+    min-width: 0;
+}
+
+.als-panel,
+.als-tabs,
+.als-status {
+    width: 100%;
+    box-sizing: border-box;
+    align-self: stretch;
+}
+
+.als-field {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3em;
+    min-width: 0;
+}
+
+.als-field select,
+.als-directory-tools input,
+.als-directory-tools select {
+    width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+}
+
+.als-mode-description {
+    margin: 0;
+    font-size: 0.85em;
+    line-height: 1.5;
+}
+
+.als-book-state,
+.als-directory-heading {
+    display: flex;
+    align-items: center;
+    gap: 0.6em;
+    justify-content: space-between;
+}
+
+.als-book-status {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.8em;
+    line-height: 1.5;
+}
+
+.als-settings .menu_button {
+    margin: 0;
+    white-space: normal;
+    line-height: 1.4;
+    height: auto;
+    min-width: 0;
+}
+
+.als-panel > .als-run {
+    width: 100%;
+    min-height: 2.6em;
+}
+
+.als-directory-tools {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.45em;
+}
+
+.als-tree {
+    max-height: 21em;
+    overflow: auto;
+    overscroll-behavior: contain;
+    border: 1px solid var(--SmartThemeBorderColor, #888);
+    border-radius: 0.5em;
+    padding: 0.5em;
+}
+
+.als-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5em;
+    font-size: 0.85em;
+}
+
+.als-preview-box {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6em;
+    padding-top: 0.6em;
+    border-top: 1px solid var(--SmartThemeBorderColor, #888);
+}
+
+.als-preview-title {
+    overflow-wrap: anywhere;
+    font-size: 0.9em;
+}
+
+.als-archive-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 0.4em;
+    padding: 0.55em 0.25em 0.55em 0.6em;
+    border-top: 1px solid var(--SmartThemeBorderColor, #888);
+    align-items: center;
+}
+
+.als-archive-name {
+    grid-column: 1 / -1;
+    font-size: 0.9em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .als-version {
     margin: 0.35em 0 0.5em 0.4em;
     font-size: 0.8em;
@@ -43,15 +196,13 @@ body.als-send-locked .swipe_right {
 
 .als-grid,
 .als-prompt-label,
-.als-actions,
-.als-directory {
+.als-actions {
     width: 100%;
     align-self: stretch;
 }
 
 .als-grid label,
-.als-prompt-label,
-.als-directory > label {
+.als-prompt-label {
     display: flex;
     flex-direction: column;
     gap: 0.25em;
@@ -73,7 +224,8 @@ body.als-send-locked .swipe_right {
 }
 
 .als-prompt {
-    min-height: 20em;
+    min-height: 16em;
+    max-height: 30em;
 }
 
 .als-actions {
@@ -92,43 +244,13 @@ body.als-send-locked .swipe_right {
     line-height: 1.3;
 }
 
-.als-actions > .als-book-open {
-    grid-column: 1 / -1;
+.als-card {
+    margin: 0.25em 0;
 }
 
-.als-directory {
-    border: 1px solid var(--SmartThemeBorderColor, #777);
-    border-radius: 0.4em;
-    padding: 0.6em;
-    max-height: 34em;
-    overflow: auto;
-}
-
-.als-directory label {
-    margin-top: 0.6em;
-}
-
-.als-card,
-.als-archive {
-    margin: 0.35em 0 0.35em 0.8em;
-}
-
-.als-card > summary,
-.als-archive > summary {
+.als-card > summary {
     cursor: pointer;
     padding: 0.3em 0;
-}
-
-.als-record {
-    display: flex;
-    align-items: center;
-    gap: 0.4em;
-    flex-wrap: wrap;
-    margin: 0.25em 0 0.25em 1.3em;
-}
-
-.als-record-title {
-    flex: 1 1 12em;
 }
 
 .als-muted {
@@ -137,4 +259,5 @@ body.als-send-locked .swipe_right {
 
 .als-preview {
     margin-top: 0.35em;
+    max-height: 23em;
 }
