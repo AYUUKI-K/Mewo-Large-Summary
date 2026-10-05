@@ -43,6 +43,7 @@ async function fixture(savedSettings = {}) {
         powerUserSettings: { reasoning: { prefix: '<star_cot>', suffix: '</star_cot>' } },
         stopGeneration() {},
         async updateWorldInfoList() {}, reloadWorldInfoEditor() {},
+        getWorldInfoNames: () => Object.keys(storedBook.entries).length ? [context.extensionSettings.auto_large_summary.worldBookName] : [],
         async saveWorldInfo(name, data) {
             writes.push({ name, data: structuredClone(data) });
             storedBook = structuredClone(data);
@@ -142,6 +143,171 @@ async function fixture(savedSettings = {}) {
         },
     };
 }
+
+function ownedSummaryEntry(uid, archiveId, cardKey = 'a.png') {
+    return {
+        uid, content: `总结正文 ${archiveId}`, constant: true, disable: false, preventRecursion: true,
+        extensions: { auto_large_summary: {
+            owner: 'auto_large_summary', storageVersion: 2, archiveId, cardKey, round: 1,
+            records: [{ round: 1, content: `总结正文 ${archiveId}`, coveredFrom: 0, coveredTo: 5 }], coveredTo: 5,
+        } },
+    };
+}
+
+test('turning off disables every owned entry while retaining content, history, other entries and floor visibility', async () => {
+    const f = await fixture();
+    const initial = { entries: {
+        0: ownedSummaryEntry(0, 'archive-a'), 1: ownedSummaryEntry(1, 'archive-b', 'b.png'),
+        2: { uid: 2, content: '手写内容', disable: false, constant: true },
+    } };
+    await f.context.saveWorldInfo('喵喵大总结世界书', initial);
+    f.writes.length = 0;
+    const messages = structuredClone(f.context.chat);
+    f.api.applyEnabledState(false);
+    await f.api.evaluate('chatSyncChain');
+    await f.api.evaluate('enabledSaveChain');
+    assert.equal(f.writes.length, 1);
+    const saved = f.writes[0].data;
+    for (const uid of [0, 1]) assert.deepEqual(saved.entries[uid], { ...initial.entries[uid], disable: true, constant: false });
+    assert.deepEqual(saved.entries[2], initial.entries[2]);
+    assert.deepEqual(f.context.chat, messages);
+    assert.deepEqual(f.context.chatMetadata, {});
+    assert.equal(f.executed.length, 0);
+    assert.equal(f.api.state().sendLockDepth, 0);
+    assert.equal(f.api.evaluate('disabledCleanupPending'), 0);
+    assert.match(f.controls.get('.als-status').textContent, /条目已停用/);
+});
+
+test('disabled startup with unsummarized card B repairs enabled card A entries once and stays idle on later chat switches', async () => {
+    const f = await fixture({ enabled: false });
+    await f.context.saveWorldInfo('喵喵大总结世界书', { entries: { 0: ownedSummaryEntry(0, 'archive-a') } });
+    f.writes.length = 0;
+    f.context.characters.push({ name: '角色 B', avatar: 'b.png', chat: 'chat-b' });
+    f.context.characterId = 1;
+    f.context.chatId = 'chat-b';
+    Object.assign(f.context.eventTypes, { CHAT_CHANGED: 'changed', CHAT_CREATED: 'created' });
+    f.api.evaluate('renderSettings = async () => {}; restoreUpdateDraft = () => {}; initialize()');
+    await f.api.evaluate('chatSyncChain');
+    assert.equal(f.writes.length, 1);
+    assert.equal(f.writes[0].data.entries[0].disable, true);
+    assert.deepEqual(f.context.chatMetadata, {});
+    let reads = 0;
+    f.context.updateWorldInfoList = async () => { reads++; };
+    await f.context.eventSource.emit('changed');
+    await f.context.eventSource.emit('created');
+    await f.api.evaluate('chatSyncChain');
+    assert.equal(reads, 0);
+    assert.equal(f.writes.length, 1);
+    assert.equal(f.executed.length, 0);
+});
+
+test('cleanup never creates a missing book and never rewrites already disabled or unrelated entries', async () => {
+    const f = await fixture({ enabled: false });
+    await f.api.evaluate('scheduleDisabledCleanup()');
+    assert.equal(f.writes.length, 0);
+    const entry = { ...ownedSummaryEntry(0, 'archive-a'), constant: false, disable: true };
+    await f.context.saveWorldInfo('喵喵大总结世界书', { entries: {
+        0: entry, 1: { uid: 1, content: '别人写的世界书', constant: true, disable: false },
+    } });
+    f.writes.length = 0;
+    await f.api.evaluate('scheduleDisabledCleanup()');
+    assert.equal(f.writes.length, 0);
+    assert.equal(f.executed.length, 0);
+});
+
+test('cleanup failure is reported without pretending the entry was disabled and releases controls', async () => {
+    const f = await fixture({ enabled: false });
+    await f.context.saveWorldInfo('喵喵大总结世界书', { entries: { 0: ownedSummaryEntry(0, 'archive-a') } });
+    f.writes.length = 0;
+    f.context.saveWorldInfo = async () => {}; // ST can swallow a failed server save.
+    await f.api.evaluate('scheduleDisabledCleanup()');
+    assert.match(f.controls.get('.als-status').textContent, /停用失败/);
+    assert.ok(f.notices.some(notice => notice.kind === 'error' && notice.args[0].includes('读回确认')));
+    assert.equal(f.api.state().sendLockDepth, 0);
+    assert.equal(f.api.evaluate('disabledCleanupPending'), 0);
+    assert.equal(f.executed.length, 0);
+});
+
+test('an old cleanup cannot deactivate a newly enabled archive after a delayed save', async () => {
+    const f = await fixture();
+    await f.context.saveWorldInfo('喵喵大总结世界书', { entries: {
+        0: ownedSummaryEntry(0, 'archive-a'), 1: ownedSummaryEntry(1, 'archive-b', 'b.png'),
+    } });
+    f.writes.length = 0;
+    f.api.evaluate(`activateWorldBook = async () => {}; updateWorldBookStatus = async () => {};
+        assemblePrompt = async () => ({}); countAssembledPrompt = async () => 1000;`);
+    const save = f.context.saveWorldInfo.bind(f.context);
+    let release;
+    let started;
+    const saving = new Promise(resolve => { started = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    f.context.saveWorldInfo = async (...args) => {
+        if (!f.api.state().settings.enabled) { started(); await gate; }
+        return await save(...args);
+    };
+    f.api.applyEnabledState(false);
+    await saving;
+    f.api.applyEnabledState(true);
+    assert.ok(f.api.state().sendLockDepth > 0, 'activation stays locked behind the cleanup save');
+    release();
+    await f.api.evaluate('enabledSaveChain');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await f.api.evaluate('chatSyncChain');
+    const current = f.writes.at(-1).data.entries;
+    assert.equal(current[0].disable, false);
+    assert.equal(current[0].constant, true);
+    assert.equal(current[1].disable, true);
+    assert.equal(f.api.state().sendLockDepth, 0);
+    assert.equal(f.api.evaluate('disabledCleanupPending'), 0);
+});
+
+test('re-enabling on unsummarized card B leaves every other archive disabled', async () => {
+    const f = await fixture({ enabled: false });
+    await f.context.saveWorldInfo('喵喵大总结世界书', { entries: { 0: ownedSummaryEntry(0, 'archive-a') } });
+    await f.api.evaluate('scheduleDisabledCleanup()');
+    f.context.characters.push({ name: '角色 B', avatar: 'b.png', chat: 'chat-b' });
+    f.context.characterId = 1;
+    f.context.chatId = 'chat-b';
+    f.api.evaluate(`activateWorldBook = async () => {}; updateWorldBookStatus = async () => {};
+        assemblePrompt = async () => ({}); countAssembledPrompt = async () => 1000;`);
+    f.api.applyEnabledState(true);
+    await f.api.evaluate('enabledSaveChain');
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await f.api.evaluate('chatSyncChain');
+    assert.equal(f.sandbox.__fixtures.book().entries[0].disable, true);
+    assert.equal(f.sandbox.__fixtures.book().entries[0].constant, false);
+    assert.equal(f.executed.length, 0);
+});
+
+test('pending cleanup blocks model sends until complete but native local slash commands still pass', async () => {
+    const f = await fixture({ enabled: false });
+    let release;
+    let started;
+    const reading = new Promise(resolve => { started = resolve; });
+    const gate = new Promise(resolve => { release = resolve; });
+    f.context.updateWorldInfoList = async () => { started(); await gate; };
+    const cleanup = f.api.evaluate('scheduleDisabledCleanup()');
+    await reading;
+    const normal = f.event('click', '继续对话');
+    f.api.blockSendInput(normal);
+    assert.equal(normal.prevented, true);
+    for (const command of ['/hide 0-9', '/unhide 0-9', '/echo test']) {
+        const event = f.event('click', command);
+        f.api.blockSendInput(event);
+        assert.equal(event.prevented, false);
+    }
+    let aborts = 0;
+    f.interceptor([], 1000, () => aborts++, 'normal');
+    assert.equal(aborts, 1);
+    release();
+    await cleanup;
+    const next = f.event('click', '继续对话');
+    f.api.blockSendInput(next);
+    assert.equal(next.prevented, false);
+    f.interceptor([], 1000, () => aborts++, 'normal');
+    assert.equal(aborts, 1);
+    assert.equal(f.api.state().sendLockDepth, 0);
+});
 
 test('both custom prompt templates survive confirmed save, mode changes and a fresh page reload verbatim', async () => {
     const f = await fixture();
@@ -779,7 +945,11 @@ test('disabled initialization and chat/reply events leave chat and world books u
         CHAT_COMPLETION_SETTINGS_READY: 'ready', MESSAGE_RECEIVED: 'received', GENERATION_ENDED: 'end',
         CHAT_CHANGED: 'changed', CHAT_CREATED: 'created',
     });
+    let reads = 0;
+    f.context.updateWorldInfoList = async () => { reads++; };
     f.api.evaluate('renderSettings = async () => {}; restoreUpdateDraft = () => {}; initialize()');
+    await f.api.evaluate('chatSyncChain');
+    assert.equal(reads, 1, 'startup only checks for leftover entries once');
     f.context.updateWorldInfoList = async () => assert.fail('disabled automatic read');
     for (const event of ['changed', 'created', 'start', 'commands', 'received', 'end']) await f.context.eventSource.emit(event, 'normal');
     await f.api.evaluate('chatSyncChain');
@@ -790,11 +960,11 @@ test('disabled initialization and chat/reply events leave chat and world books u
     assert.equal(f.notices.length, 0);
 });
 
-test('disabled configuration can save settings and prompts without touching any world book', async () => {
+test('disabled configuration saves prompts and cleans old book state only when the name changes', async () => {
     const f = await fixture({ enabled: false });
-    f.context.updateWorldInfoList = async () => assert.fail('disabled book read while saving config');
     f.api.evaluate('settingsDraft.worldBookName = "新的世界书名字"');
     await f.api.saveSettingsDraft();
+    await f.api.evaluate('chatSyncChain');
     f.controls.get('.als-prompt').value = '长期保存的自定义模板';
     await f.api.savePromptDraft();
     const reloaded = await fixture(f.savedPreferences.at(-1).auto_large_summary);
@@ -854,7 +1024,7 @@ test('turning off also cancels manual summaries without saving or hiding', async
     assert.equal(f.api.state().sendLockDepth, 0);
 });
 
-test('enabling resumes archive sync after settings persistence', async () => {
+test('enabling immediately resumes archive sync and persists the enabled setting', async () => {
     const f = await fixture({ enabled: false });
     let synced = 0;
     f.sandbox.__fixtures.sync = () => { synced++; };
