@@ -1,0 +1,10 @@
+{
+  "display_name": "喵喵大总结",
+  "loading_order": 100,
+  "js": "index.js",
+  "css": "style.css",
+  "author": "Auto Large Summary contributors",
+  "version": "0.1.0",
+  "auto_update": false,
+  "generate_interceptor": "autoLargeSummaryGenerationInterceptor"
+}
