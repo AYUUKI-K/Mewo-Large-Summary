@@ -5,7 +5,9 @@ const test = require('node:test');
 const vm = require('node:vm');
 const { webcrypto } = require('node:crypto');
 
-const source = readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+const source = readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8')
+    .replace(/^export\s+/gm, '')
+    .replace(/\bimport\.meta\.url/g, JSON.stringify('http://st.local/scripts/extensions/third-party/Mewo-Large-Summary/index.js'));
 const clone = value => structuredClone(value);
 
 // Model ST's server and client separately: /get supplies a dummy for missing
@@ -38,7 +40,7 @@ function fixture({ books = {}, active = [], characterId = '0', saveFails = false
         getCurrentChatId: () => '当前存档',
         chat: [{ mes: '已有聊天内容', is_user: false }],
         chatMetadata: {},
-        extensionSettings: {},
+        extensionSettings: { auto_large_summary: { worldBookName: '大总结世界书' } },
         eventSource: { on() {} },
         eventTypes: { APP_READY: 'ready' },
         saveMetadata: async () => { calls.metadata++; },
@@ -65,6 +67,7 @@ function fixture({ books = {}, active = [], characterId = '0', saveFails = false
     };
     const sandbox = vm.createContext({
         window: { SillyTavern: { getContext: () => context } },
+        structuredClone, URL, location: { pathname: '/' },
         document: {
             querySelectorAll(selector) {
                 assert.equal(selector, '#world_info option');

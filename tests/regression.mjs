@@ -15,7 +15,9 @@ async function fixture(savedSettings = {}) {
     const savedPreferences = [];
     const controls = new Map();
     const control = () => ({ disabled: false, getAttribute: () => null, setAttribute() {}, removeAttribute() {} });
-    for (const selector of ['.als-status', '.als-settings-state', '.als-instruction-depth-field', '.als-instruction-role-field', '.als-delete-round', '.als-history-select']) controls.set(selector, control());
+    for (const selector of ['.als-status', '.als-settings-state', '.als-instruction-depth-field', '.als-instruction-role-field', '.als-delete-round', '.als-history-select', '.als-prompt', '.als-prompt-mode', '.als-settings-mode', '.als-mode-description', '.als-prompt-state', '.als-model-status', '.als-model-fetch']) controls.set(selector, control());
+    for (const selector of ['.als-enabled', '.als-threshold', '.als-keep', '.als-book', '.als-depth', '.als-instruction-position', '.als-instruction-depth', '.als-instruction-role', '.als-api-mode', '.als-secondary-url', '.als-secondary-key', '.als-secondary-model', '.als-secondary-settings', '.als-preview-box']) controls.set(selector, control());
+    const handlers = new Map();
     controls.get('.als-history-select').value = 'all';
     const input = { id: 'send_textarea', value: '', dispatchEvent() {} };
     const send = { ...control(), id: 'send_but', closest: () => send };
@@ -28,8 +30,13 @@ async function fixture(savedSettings = {}) {
         characters: [{ name: '角色 A', avatar: 'a.png', chat: 'chat-a' }],
         chat: Array.from({ length: 30 }, (_, i) => ({ mes: `楼层 ${i}`, name: i % 2 ? '角色 A' : '用户', is_user: !(i % 2), is_system: false })),
         chatMetadata: {}, extensionSettings: { auto_large_summary: structuredClone(savedSettings) },
-        eventTypes: { APP_READY: 'app-ready' },
-        eventSource: { on() {}, makeLast() {} },
+        eventTypes: { APP_READY: 'app-ready', SETTINGS_UPDATED: 'settings-updated' },
+        eventSource: {
+            on(event, handler) { if (!handlers.has(event)) handlers.set(event, new Set()); handlers.get(event).add(handler); },
+            removeListener(event, handler) { handlers.get(event)?.delete(handler); },
+            async emit(event, ...args) { for (const handler of handlers.get(event) ?? []) await handler(...args); },
+            makeLast() {},
+        },
         saveSettingsDebounced() {}, saveMetadataDebounced() {}, async saveMetadata() {},
         getRequestHeaders: () => ({}),
         powerUserSettings: { reasoning: { prefix: '<star_cot>', suffix: '</star_cot>' } },
@@ -50,12 +57,16 @@ async function fixture(savedSettings = {}) {
     const native = {
         is_send_press: false,
         isGenerating: () => false,
-        async saveSettings() { savedPreferences.push(structuredClone(context.extensionSettings)); },
+        async saveSettings() {
+            if (context.suppressSaveConfirmation) return;
+            savedPreferences.push(structuredClone(context.extensionSettings));
+            await context.eventSource.emit('settings-updated');
+        },
     };
     const tokenRenders = [];
     const openai = { promptManager: { render: value => tokenRenders.push(value) } };
     const sandbox = createContext({
-        console: { ...console, error() {}, warn() {} }, structuredClone, setTimeout, clearTimeout, URL,
+        console: { ...console, error() {}, warn() {} }, structuredClone, setTimeout, clearTimeout, URL, Response, AbortController, AbortSignal,
         location: { origin: 'http://st.local' },
         crypto: { randomUUID: () => 'archive-a' },
         window: {
@@ -68,6 +79,7 @@ async function fixture(savedSettings = {}) {
         },
         document: {
             body, addEventListener() {},
+            createElement: () => ({ value: '' }),
             querySelector: selector => selector === '#send_textarea' ? input : controls.get(selector),
             querySelectorAll: () => [send, guarded],
         },
@@ -82,7 +94,8 @@ async function fixture(savedSettings = {}) {
         blockSendInput, lockSending, unlockSending, getSettings, applyEnabledState,
         onGenerationAfterCommands, onMainApiRequest, onFinalPromptData, onTemplatePreviewContext,
         assemblePrompt, countAssembledPrompt, runLargeSummary, checkAfterReply, stripReasoning, isSameArchive,
-        installVisibilityCommandHooks, refreshVisibilityTokens,
+        installVisibilityCommandHooks, refreshVisibilityTokens, getSecondaryConfig, buildSecondaryRequest, fetchSecondaryModels,
+        savePromptDraft, syncPromptEditor, changeMode, persistSettingsNow, saveSettingsDraft, onExtensionUpdate,
         evaluate: code => eval(code),
         state: () => ({ sendLockDepth, runInProgress, thresholdCheckInProgress, pendingGeneration, settings })
     };`, {
@@ -116,7 +129,7 @@ async function fixture(savedSettings = {}) {
         });
     };
     return {
-        api, sandbox, event, input, send, guarded, body, notices, writes, executed, savedPreferences, tokenRenders,
+        api, sandbox, event, input, send, guarded, body, notices, writes, executed, savedPreferences, tokenRenders, controls, handlers,
         context: initialContext, setContext: next => { context = next; },
         interceptor: sandbox[manifest.generate_interceptor],
         prepareSummary({ nativeRequest = false } = {}) {
@@ -128,6 +141,452 @@ async function fixture(savedSettings = {}) {
         },
     };
 }
+
+test('both custom prompt templates survive confirmed save, mode changes and a fresh page reload verbatim', async () => {
+    const f = await fixture();
+    const incremental = '自定义新增\n{{user}} {{getvar::测试}}\n<details><summary>大总结</summary>\n保留所有标点 `$` 和 \\ 路径\n</details>';
+    const merged = '自定义合并\n<details><summary>角色表</summary>\n{{char}} 与中文🙂\n</details>';
+    f.controls.get('.als-prompt').value = incremental;
+    await f.api.savePromptDraft();
+    f.api.changeMode('merged');
+    f.controls.get('.als-prompt').value = merged;
+    await f.api.savePromptDraft();
+    assert.equal(f.savedPreferences.length, 2);
+    assert.equal(f.api.state().settings.prompt, incremental, 'editing another mode must not change the active prompt');
+    const saved = f.savedPreferences.at(-1).auto_large_summary;
+    const reloaded = await fixture({ ...saved, mode: 'merged' });
+    reloaded.api.getSettings();
+    reloaded.api.getSettings();
+    assert.equal(reloaded.api.state().settings.prompts.incremental, incremental);
+    assert.equal(reloaded.api.state().settings.prompts.merged, merged);
+    assert.equal(reloaded.api.state().settings.prompt, merged);
+    reloaded.api.changeMode('incremental');
+    assert.equal(reloaded.controls.get('.als-prompt').value, incremental);
+    assert.equal(f.handlers.get('settings-updated').size, 0, 'confirmation listeners must be removed');
+});
+
+test('unconfirmed ST settings saves cannot show prompt-save success and keep the unsaved draft', async () => {
+    const f = await fixture();
+    const previous = f.api.state().settings.prompts.incremental;
+    f.context.suppressSaveConfirmation = true;
+    f.controls.get('.als-prompt').value = '需要重试的自定义提示词';
+    await f.api.savePromptDraft();
+    assert.equal(f.savedPreferences.length, 0);
+    assert.equal(f.api.state().settings.prompts.incremental, previous);
+    assert.equal(f.controls.get('.als-prompt').value, '需要重试的自定义提示词');
+    assert.equal(f.notices.some(notice => notice.kind === 'success'), false);
+    assert.ok(f.notices.some(notice => notice.kind === 'error' && notice.args[0].includes('保存失败')));
+    assert.equal(f.api.state().sendLockDepth, 0);
+    assert.equal(f.handlers.get('settings-updated').size, 0);
+    f.context.suppressSaveConfirmation = false;
+    await f.api.savePromptDraft();
+    assert.equal(f.savedPreferences.at(-1).auto_large_summary.prompts.incremental, '需要重试的自定义提示词');
+});
+
+test('empty prompt drafts cannot replace saved templates', async () => {
+    const f = await fixture();
+    const previous = f.api.state().settings.prompt;
+    f.controls.get('.als-prompt').value = '   \n';
+    await f.api.savePromptDraft();
+    assert.equal(f.api.state().settings.prompt, previous);
+    assert.equal(f.savedPreferences.length, 0);
+});
+
+test('upgrading legacy settings preserves custom prompts and repairs missing templates only', async () => {
+    const legacy = await fixture({ prompt: '用户原来的旧模板\n{{char}}' });
+    assert.equal(legacy.api.state().settings.prompts.incremental, '用户原来的旧模板\n{{char}}');
+    const partial = await fixture({ prompts: { incremental: '新模板', merged: 123 }, apiMode: 'invalid' });
+    assert.equal(partial.api.state().settings.prompts.incremental, '新模板');
+    assert.match(partial.api.state().settings.prompts.merged, /全文大总结/);
+    assert.equal(partial.api.state().settings.apiMode, 'main');
+    const defaults = await fixture();
+    assert.match(defaults.api.state().settings.prompts.incremental, /开始执行\*\*新增大总结\*\*/);
+    assert.match(defaults.api.state().settings.prompts.merged, /严禁输出<moew_FM>摘要/);
+});
+
+test('saving or resetting ordinary settings does not replace either saved custom prompt', async () => {
+    const f = await fixture({ prompts: { incremental: '增量自定义', merged: '合并自定义' } });
+    f.api.evaluate(`scheduleChatSync = async () => {}; settingsDraft.keepRecent = 15; settingsDraft.mode = 'merged'`);
+    await f.api.saveSettingsDraft();
+    assert.equal(f.savedPreferences.at(-1).auto_large_summary.prompt, '合并自定义');
+    f.api.evaluate(`settingsDraft = Object.fromEntries(SETTING_FIELDS.map(key => [key, structuredClone(DEFAULT_SETTINGS[key])]));`);
+    await f.api.saveSettingsDraft();
+    const saved = f.savedPreferences.at(-1).auto_large_summary;
+    assert.equal(saved.prompts.incremental, '增量自定义');
+    assert.equal(saved.prompts.merged, '合并自定义');
+});
+
+test('secondary URL normalization accepts base and completion URLs without duplicated paths', async () => {
+    const f = await fixture();
+    for (const [input, expected] of [
+        ['https://example.test', 'https://example.test/v1'],
+        ['https://example.test/v1/', 'https://example.test/v1'],
+        ['https://example.test/v1/chat/completions', 'https://example.test/v1'],
+        ['http://localhost:5000/custom/models', 'http://localhost:5000/custom'],
+    ]) {
+        const config = f.api.getSecondaryConfig({ secondaryUrl: input, secondaryKey: 'Bearer mock-key', secondaryModel: 'model-a' });
+        assert.equal(config.url, expected);
+        assert.equal(config.key, 'mock-key');
+    }
+    for (const url of ['', 'file:///tmp', 'javascript:alert(1)', 'https://user:pass@example.test/v1', 'https://example.test/v1?key=secret']) {
+        assert.throws(() => f.api.getSecondaryConfig({ secondaryUrl: url, secondaryModel: 'model-a' }), /喵/);
+    }
+    assert.throws(() => f.api.getSecondaryConfig({ secondaryUrl: 'https://example.test/v1', secondaryModel: '' }), /选择副 API 模型/);
+    assert.throws(() => f.api.getSecondaryConfig({ secondaryUrl: 'https://example.test/v1', secondaryKey: 'bad\nkey', secondaryModel: 'a' }), /不能换行/);
+});
+
+test('secondary payload keeps processed messages and standard sampling but excludes main credentials and tools', async () => {
+    const f = await fixture();
+    const original = { messages: [{ role: 'system', content: '经过 EJS 处理的环境' }, { role: 'user', content: '尾部指令' }],
+        max_tokens: 4096, temperature: 0.7, top_p: 0.9, stream: true, model: 'main-model',
+        reverse_proxy: 'https://main.test', proxy_password: 'main-key', custom_include_headers: 'main-secret',
+        tools: [{ type: 'function' }], tool_choice: 'auto', secret_id: 'main-secret-id', custom_include_body: 'model: wrong',
+        custom_prompt_post_processing: 'strict', stop: ['stop'] };
+    const payload = f.api.buildSecondaryRequest(f.context, original, { url: 'https://secondary.test/v1', key: 'secondary-key', model: 'selected-model' });
+    assert.deepEqual(JSON.parse(JSON.stringify(payload.messages)), original.messages);
+    assert.equal(payload.chat_completion_source, 'custom');
+    assert.equal(payload.model, 'selected-model');
+    assert.equal(payload.stream, false);
+    assert.equal(payload.max_tokens, 4096);
+    assert.equal(payload.temperature, 0.7);
+    assert.equal(payload.custom_prompt_post_processing, 'strict');
+    assert.equal(JSON.parse(payload.custom_include_headers).Authorization, 'Bearer secondary-key');
+    assert.equal(JSON.stringify(payload).includes('main-secret'), false);
+    assert.equal(JSON.stringify(payload).includes('main-key'), false);
+    assert.equal(payload.tools, undefined);
+    assert.equal(payload.custom_include_body, undefined);
+    assert.notEqual(payload.messages, original.messages);
+    const keyless = f.api.buildSecondaryRequest(f.context, original, { url: 'http://local.test/v1', key: '', model: 'local' });
+    assert.equal(JSON.parse(keyless.custom_include_headers).Authorization, '', 'keyless requests cannot borrow the main key');
+});
+
+test('model pulling uses ST custom backend, deduplicates IDs and leaves model selection to the user', async () => {
+    const f = await fixture();
+    f.api.evaluate(`Object.assign(settingsDraft, { apiMode: 'secondary', secondaryUrl: 'https://secondary.test/v1', secondaryKey: 'mock-key' })`);
+    let payload;
+    f.sandbox.fetch = async (url, init) => {
+        assert.equal(url, '/api/backends/chat-completions/status');
+        payload = JSON.parse(init.body);
+        assert.ok(init.signal);
+        return { ok: true, json: async () => ({ data: [{ id: 'model-z' }, { id: 'model-a' }, { id: 'model-z' }, {}] }) };
+    };
+    await f.api.fetchSecondaryModels();
+    assert.equal(payload.custom_url, 'https://secondary.test/v1');
+    assert.equal(JSON.parse(payload.custom_include_headers).Authorization, 'Bearer mock-key');
+    assert.deepEqual(Array.from(f.api.evaluate('settingsDraft.secondaryModels')), ['model-a', 'model-z']);
+    assert.equal(f.api.evaluate('settingsDraft.secondaryModel'), '');
+    assert.equal(f.savedPreferences.length, 0);
+    assert.equal(f.controls.get('.als-model-fetch').disabled, false);
+});
+
+test('stale model lists cannot overwrite a changed endpoint or key', async () => {
+    const f = await fixture();
+    f.api.evaluate(`settingsDraft.secondaryUrl = 'https://old.test/v1'`);
+    f.sandbox.fetch = async () => {
+        f.api.evaluate(`settingsDraft.secondaryUrl = 'https://new.test/v1'`);
+        return { ok: true, json: async () => ({ data: [{ id: 'old-model' }] }) };
+    };
+    await f.api.fetchSecondaryModels();
+    assert.deepEqual(Array.from(f.api.evaluate('settingsDraft.secondaryModels')), []);
+    assert.equal(f.controls.get('.als-model-fetch').disabled, false);
+});
+
+for (const response of [{ ok: false, status: 401 }, { ok: true, json: async () => ({ error: true }) }, { ok: true, json: async () => ({ data: [] }) }]) {
+    test(`model list failure or empty response remains usable for manually entered models (${response.status ?? '200'})`, async () => {
+        const f = await fixture();
+        f.api.evaluate(`settingsDraft.secondaryUrl = 'https://secondary.test/v1'; settingsDraft.secondaryModel = 'manual-model'`);
+        f.sandbox.fetch = async () => response;
+        await f.api.fetchSecondaryModels();
+        assert.equal(f.api.evaluate('settingsDraft.secondaryModel'), 'manual-model');
+        assert.equal(f.controls.get('.als-model-fetch').disabled, false);
+        assert.equal(f.writes.length, 0);
+    });
+}
+
+test('secondary connection and chosen model persist without modifying the main API configuration', async () => {
+    const f = await fixture();
+    f.context.chatCompletionSettings = { custom_url: 'https://main.test/v1', model: 'main-model' };
+    const original = structuredClone(f.context.chatCompletionSettings);
+    f.api.evaluate(`scheduleChatSync = async () => {}; Object.assign(settingsDraft, {
+        apiMode: 'secondary', secondaryUrl: 'https://secondary.test/v1/chat/completions', secondaryKey: 'mock-key',
+        secondaryModel: 'chosen-model', secondaryModels: ['chosen-model'] });`);
+    await f.api.saveSettingsDraft();
+    const saved = f.savedPreferences.at(-1).auto_large_summary;
+    const reloaded = await fixture(saved);
+    assert.equal(reloaded.api.state().settings.secondaryUrl, 'https://secondary.test/v1');
+    assert.equal(reloaded.api.state().settings.secondaryKey, 'mock-key');
+    assert.equal(reloaded.api.state().settings.secondaryModel, 'chosen-model');
+    assert.equal(reloaded.api.state().settings.apiMode, 'secondary');
+    assert.deepEqual(f.context.chatCompletionSettings, original);
+});
+
+test('invalid or unconfirmed secondary settings do not replace the saved API selection', async () => {
+    const f = await fixture();
+    f.api.evaluate(`scheduleChatSync = async () => {}; settingsDraft.apiMode = 'secondary'`);
+    await f.api.saveSettingsDraft();
+    assert.equal(f.savedPreferences.length, 0);
+    assert.equal(f.api.state().settings.apiMode, 'main');
+    f.api.evaluate(`settingsDraft.secondaryUrl = 'https://secondary.test/v1'; settingsDraft.secondaryModel = 'manual-model'`);
+    f.context.suppressSaveConfirmation = true;
+    await f.api.saveSettingsDraft();
+    assert.equal(f.api.state().settings.apiMode, 'main');
+    assert.equal(f.api.evaluate('settingsDraft.apiMode'), 'secondary');
+    assert.equal(f.api.state().sendLockDepth, 0);
+});
+
+for (const mainApi of ['openai', 'kobold']) {
+    test(`secondary summary routes only the exact native quiet request; ${mainApi} environment and cleanup are preserved`, async () => {
+        const f = await fixture({ apiMode: 'secondary', secondaryUrl: 'https://secondary.test/v1', secondaryKey: 'mock-key', secondaryModel: 'selected-model' });
+        f.prepareSummary({ nativeRequest: true });
+        f.context.mainApi = mainApi;
+        const realFetch = f.sandbox.fetch;
+        let calls = 0;
+        let untouched = 0;
+        const body = '<details><summary>大总结</summary>副 API 正文</details>\n<details><summary>角色表</summary>角色</details>';
+        const raw = `<star_cot>不保存推理</star_cot>\n${body}`;
+        const controller = new AbortController();
+        f.sandbox.fetch = async (url, init) => {
+            if (url === '/api/backends/chat-completions/generate') {
+                calls++;
+                const payload = JSON.parse(init.body);
+                assert.equal(payload.model, 'selected-model');
+                assert.equal(payload.custom_url, 'https://secondary.test/v1');
+                assert.equal(payload.stream, false);
+                assert.equal(init.signal, controller.signal);
+                const prompt = payload.messages.at(-1).content;
+                assert.ok(prompt.includes(f.api.state().settings.prompt));
+                assert.equal(payload.tools, undefined);
+                return new Response(JSON.stringify({ choices: [{ message: { content: raw, reasoning_content: '不抓取此字段' } }] }));
+            }
+            if (url === '/api/unrelated') { untouched++; return { ok: true }; }
+            return realFetch(url, init);
+        };
+        const originalFetch = f.sandbox.fetch;
+        f.context.generate = async (type, _options, dryRun) => {
+            assert.equal(type, 'quiet');
+            assert.equal(dryRun, false);
+            f.api.onGenerationAfterCommands(type, {}, false);
+            let aborted = false;
+            f.interceptor([], 60000, () => { aborted = true; }, type);
+            assert.equal(aborted, false);
+            const payload = mainApi === 'openai'
+                ? { type, messages: [{ role: 'system', content: '酒馆处理后的预设' }, { role: 'user', content: '酒馆处理后的历史' }], tools: [{}] }
+                : { prompt: '酒馆处理后的文本环境', max_length: 4096 };
+            if (mainApi === 'openai') f.api.onMainApiRequest(payload);
+            else f.api.onFinalPromptData(payload, false);
+            await f.sandbox.fetch('/api/unrelated', { body: 'unrelated' });
+            const response = await f.sandbox.fetch(`/api/backends/${mainApi === 'openai' ? 'chat-completions' : 'kobold'}/generate`, { body: JSON.stringify(payload), signal: controller.signal });
+            const data = await response.json();
+            return mainApi === 'openai' ? data.choices[0].message.content : data.results[0].text;
+        };
+        assert.equal(await f.api.runLargeSummary(), true);
+        assert.equal(calls, 1);
+        assert.equal(untouched, 1);
+        assert.equal(Object.values(f.writes[0].data.entries)[0].content, body);
+        assert.equal(f.sandbox.fetch, originalFetch);
+        assert.deepEqual(f.executed, ['/hide 0-9']);
+        assert.equal(f.api.state().sendLockDepth, 0);
+    });
+}
+
+for (const failure of ['http', 'provider', 'empty', 'cancel']) {
+    test(`secondary ${failure} failures never save or hide and restore the native request flow`, async () => {
+        const f = await fixture({ apiMode: 'secondary', secondaryUrl: 'https://secondary.test/v1', secondaryModel: 'chosen' });
+        f.prepareSummary({ nativeRequest: true });
+        const realFetch = f.sandbox.fetch;
+        f.sandbox.fetch = async (url, init) => {
+            if (url !== '/api/backends/chat-completions/generate') return realFetch(url, init);
+            if (failure === 'http') return new Response('{}', { status: 401 });
+            if (failure === 'provider') return new Response(JSON.stringify({ error: true }));
+            if (failure === 'cancel') f.api.blockSendInput(f.event('click', '/unhide 0-9999'));
+            const content = failure === 'empty' ? '<star_cot>只有推理</star_cot>' : '旧档总结';
+            return new Response(JSON.stringify({ choices: [{ message: { content } }] }));
+        };
+        const originalFetch = f.sandbox.fetch;
+        f.context.generate = async () => {
+            const payload = { type: 'quiet', messages: [{ role: 'user', content: '环境' }] };
+            f.api.onMainApiRequest(payload);
+            return await f.sandbox.fetch('/api/backends/chat-completions/generate', { body: JSON.stringify(payload) });
+        };
+        await f.api.runLargeSummary();
+        assert.equal(f.writes.length, 0);
+        assert.equal(f.executed.length, 0);
+        assert.equal(f.sandbox.fetch, originalFetch);
+        assert.equal(f.api.evaluate('summaryRequest'), null);
+        assert.equal(f.api.state().sendLockDepth, 0);
+    });
+}
+
+test('after-summary over-threshold warning stops automatic repeats across replies and archive reopening', async () => {
+    const f = await fixture();
+    await f.api.evaluate('ensureArchive()');
+    f.api.evaluate(`__fixtures.calls = 0; __fixtures.counts = [61000, 65000]; waitForCurrentGeneration = async () => true;
+        assemblePrompt = async () => ({}); countAssembledPrompt = async () => __fixtures.counts.shift() ?? 65000;
+        runLargeSummary = async () => { __fixtures.calls++; return true; };`);
+    await f.api.checkAfterReply({ chatId: 'chat-a', characterId: 0, onOpen: false });
+    assert.equal(f.api.evaluate('__fixtures.calls'), 1);
+    assert.equal(f.context.chatMetadata.auto_large_summary.summaryStillOverThreshold, true);
+    assert.equal(f.context.chatMetadata.auto_large_summary.autoTriggerArmed, false);
+    assert.ok(f.notices.some(notice => notice.kind === 'warning' && notice.args[0].includes('65,000 / 60,000')));
+    await f.api.checkAfterReply({ chatId: 'chat-a', characterId: 0, onOpen: false });
+    await f.api.checkAfterReply({ chatId: 'chat-a', characterId: 0, onOpen: true });
+    assert.equal(f.api.evaluate('__fixtures.calls'), 1);
+    assert.equal(f.executed.length, 0);
+    f.api.evaluate('__fixtures.counts = [10000]');
+    await f.api.checkAfterReply({ chatId: 'chat-a', characterId: 0, onOpen: false });
+    assert.equal(f.context.chatMetadata.auto_large_summary.summaryStillOverThreshold, false);
+    assert.equal(f.context.chatMetadata.auto_large_summary.autoTriggerArmed, true);
+});
+
+test('manual summary recount reports an over-threshold result without changing saved history or issuing commands', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    await f.api.runLargeSummary();
+    f.api.evaluate('assemblePrompt = async () => ({}); countAssembledPrompt = async () => 70000');
+    await f.api.refreshVisibilityTokens(f.context, undefined, { afterSummary: true });
+    assert.equal(f.context.chatMetadata.auto_large_summary.summaryStillOverThreshold, true);
+    assert.equal(f.writes.length, 1);
+    assert.deepEqual(f.executed, ['/hide 0-9']);
+    assert.ok(f.notices.some(notice => notice.kind === 'warning' && notice.args[0].includes('70,000')));
+});
+
+test('a manual hide below threshold clears the pause but only recounts without generating or hiding again', async () => {
+    const f = await fixture();
+    await f.api.evaluate('ensureArchive()');
+    f.context.chatMetadata.auto_large_summary.summaryStillOverThreshold = true;
+    f.context.chatMetadata.auto_large_summary.autoTriggerArmed = false;
+    await f.context.executeSlashCommandsWithOptions('/hide 0-9');
+    f.api.evaluate('assemblePrompt = async () => ({}); countAssembledPrompt = async () => 10000');
+    await f.api.refreshVisibilityTokens(f.context);
+    assert.equal(f.context.chatMetadata.auto_large_summary.summaryStillOverThreshold, false);
+    assert.equal(f.context.chatMetadata.auto_large_summary.autoTriggerArmed, true);
+    assert.deepEqual(f.executed, ['/hide 0-9']);
+    assert.equal(f.writes.length, 0);
+});
+
+test('a copied archive cannot inherit another character over-threshold pause', async () => {
+    const f = await fixture();
+    await f.api.evaluate('ensureArchive()');
+    f.context.chatMetadata.auto_large_summary.summaryStillOverThreshold = true;
+    f.context.characters.push({ name: '角色 B', avatar: 'b.png', chat: 'chat-b' });
+    f.setContext({ ...f.context, characterId: 1, chatId: 'chat-b' });
+    await f.api.evaluate('ensureArchive()');
+    assert.equal(f.context.chatMetadata.auto_large_summary.summaryStillOverThreshold, false);
+    assert.equal(f.context.chatMetadata.auto_large_summary.autoTriggerArmed, true);
+});
+
+test('finishing a model pull while sending is locked does not leave the model button disabled', async () => {
+    const f = await fixture();
+    f.api.evaluate(`settingsDraft.secondaryUrl = 'https://secondary.test/v1'`);
+    let finish;
+    f.sandbox.fetch = async () => await new Promise(resolve => { finish = resolve; });
+    const pending = f.api.fetchSecondaryModels();
+    assert.equal(f.controls.get('.als-model-fetch').disabled, true);
+    f.api.lockSending();
+    finish({ ok: true, json: async () => ({ data: [{ id: 'model-a' }] }) });
+    await pending;
+    assert.equal(f.controls.get('.als-model-fetch').disabled, true);
+    f.api.unlockSending();
+    assert.equal(f.controls.get('.als-model-fetch').disabled, false);
+});
+
+for (const failure of [false, true]) {
+    test(`secondary depth injection restores the previous extension prompt after ${failure ? 'failure' : 'success'}`, async () => {
+        const f = await fixture({ apiMode: 'secondary', secondaryUrl: 'https://secondary.test/v1', secondaryModel: 'chosen', instructionPosition: 'depth', instructionDepth: 0, instructionRole: 0 });
+        f.prepareSummary({ nativeRequest: true });
+        const id = 'meow_large_summary_instruction';
+        const previous = { value: '原来的注入' };
+        f.context.extensionPrompts = { [id]: previous };
+        f.context.setExtensionPrompt = (key, value, position, depth, scan, role) => {
+            assert.equal(position, 1);
+            assert.equal(depth, 0);
+            assert.equal(role, 0);
+            f.context.extensionPrompts[key] = { value };
+        };
+        const realFetch = f.sandbox.fetch;
+        f.sandbox.fetch = async (url, init) => {
+            if (url !== '/api/backends/chat-completions/generate') return realFetch(url, init);
+            const payload = JSON.parse(init.body);
+            assert.equal(payload.messages[0].role, 'system');
+            assert.equal(payload.messages[0].content, f.api.state().settings.prompt);
+            assert.equal(payload.messages.length, 2, 'depth mode must not also add a tail instruction');
+            return failure ? new Response('{}', { status: 500 }) : new Response(JSON.stringify({ choices: [{ message: { content: '正确正文' } }] }));
+        };
+        f.context.generate = async () => {
+            const payload = { type: 'quiet', messages: [{ role: 'system', content: f.context.extensionPrompts[id].value }, { role: 'user', content: '剧情' }] };
+            f.api.onMainApiRequest(payload);
+            const response = await f.sandbox.fetch('/api/backends/chat-completions/generate', { body: JSON.stringify(payload) });
+            return (await response.json()).text;
+        };
+        await f.api.runLargeSummary();
+        assert.equal(f.context.extensionPrompts[id], previous);
+        assert.equal(f.writes.length, failure ? 0 : 1);
+        assert.equal(f.executed.length, failure ? 0 : 1);
+        assert.equal(f.api.state().sendLockDepth, 0);
+    });
+}
+
+test('invalid post-summary token counts cannot rearm automatic generation', async () => {
+    const f = await fixture();
+    await f.api.evaluate('ensureArchive()');
+    f.api.evaluate(`__fixtures.counts = [61000, NaN]; waitForCurrentGeneration = async () => true;
+        assemblePrompt = async () => ({}); countAssembledPrompt = async () => __fixtures.counts.shift();
+        runLargeSummary = async () => true;`);
+    await f.api.checkAfterReply({ chatId: 'chat-a', characterId: 0, onOpen: false });
+    assert.equal(f.context.chatMetadata.auto_large_summary.autoTriggerArmed, false);
+    assert.ok(f.notices.some(notice => notice.kind === 'error' && notice.args[0].includes('无效')));
+});
+
+test('a late hook rewriting the owned summary request cannot silently send it to the main API', async () => {
+    const f = await fixture({ apiMode: 'secondary', secondaryUrl: 'https://secondary.test/v1', secondaryModel: 'chosen' });
+    f.prepareSummary({ nativeRequest: true });
+    const realFetch = f.sandbox.fetch;
+    let calls = 0;
+    f.sandbox.fetch = async (url, init) => {
+        if (url === '/api/backends/chat-completions/generate') { calls++; return new Response('{}'); }
+        return realFetch(url, init);
+    };
+    f.context.generate = async () => {
+        const payload = { type: 'quiet', chat_completion_source: 'openai', model: 'main-model', messages: [{ role: 'user', content: '正文' }] };
+        f.api.onMainApiRequest(payload);
+        assert.equal(payload.chat_completion_source, 'custom');
+        assert.equal(payload.model, 'chosen');
+        payload.chat_completion_source = 'openai'; // Simulate a later conflicting extension hook.
+        await f.sandbox.fetch('/api/backends/chat-completions/generate', { body: JSON.stringify(payload) });
+    };
+    await f.api.runLargeSummary();
+    assert.equal(calls, 0);
+    assert.equal(f.writes.length, 0);
+    assert.equal(f.executed.length, 0);
+    assert.equal(f.api.state().sendLockDepth, 0);
+});
+
+test('updating waits for confirmed settings persistence, preserves the input draft, and then refreshes', async () => {
+    const f = await fixture();
+    const drafts = new Map();
+    f.sandbox.sessionStorage = { setItem: (key, value) => drafts.set(key, value) };
+    let reloads = 0;
+    f.sandbox.location.reload = () => {
+        assert.equal(f.savedPreferences.at(-1).auto_large_summary.enabled, false);
+        reloads++;
+    };
+    f.input.value = '还没发送的草稿';
+    f.api.applyEnabledState(false);
+    await f.api.onExtensionUpdate();
+    assert.equal(reloads, 1);
+    assert.equal(JSON.parse([...drafts.values()][0]).text, '还没发送的草稿');
+    assert.equal(f.api.state().sendLockDepth, 0);
+});
+
+test('product notifications use meow voice while user-supplied prompts remain unchanged', async () => {
+    const f = await fixture({ prompts: { incremental: '原封不动的用户提示词', merged: '用户的另一份模板' } });
+    f.prepareSummary();
+    await f.api.runLargeSummary();
+    for (const notice of f.notices.filter(notice => notice.kind !== 'clear')) assert.match(notice.args[0], /喵/);
+    assert.equal(f.api.state().settings.prompt, '原封不动的用户提示词');
+    assert.match(source, />mewo!!<\/span>/);
+    assert.equal(source.includes('>New!</span>'), false);
+});
 
 test('each newly saved summary runs one native hide from zero; manual unhide persists between rounds', async () => {
     const f = await fixture();

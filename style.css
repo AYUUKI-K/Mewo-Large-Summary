@@ -80,6 +80,7 @@
 
 .als-book-state,
 .als-update-state,
+.als-model-state,
 .als-directory-heading {
     display: flex;
     align-items: center;
@@ -103,6 +104,38 @@
     white-space: nowrap !important;
     writing-mode: horizontal-tb;
     word-break: keep-all;
+}
+
+.als-secondary-settings {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7em;
+    padding: 0.8em;
+    border: 1px solid var(--SmartThemeBorderColor, #888);
+    border-radius: 0.5em;
+    min-width: 0;
+}
+
+.als-field input {
+    width: 100%;
+    box-sizing: border-box;
+    min-width: 0;
+}
+
+.als-model-status {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-size: 0.8em;
+}
+
+.als-settings .als-model-fetch {
+    flex: 0 0 auto;
+    width: auto !important;
+    min-width: 6em;
+    white-space: nowrap !important;
+    writing-mode: horizontal-tb;
+    padding: 0.5em 0.7em;
 }
 
 .als-update-state {
