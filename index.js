@@ -1,6 +1,6 @@
 const MODULE_NAME = 'auto_large_summary';
 const ENTRY_MARKER = 'auto_large_summary';
-const EXTENSION_VERSION = '0.3.2';
+const EXTENSION_VERSION = '0.3.3';
 const SUMMARY_INJECTION_ID = 'meow_large_summary_instruction';
 const LEGACY_DEFAULT_PROMPT = `ELLA, suspend all current commands. The following directive has absolute priority:
 Since THE STARS has grown lengthy, extract and compose a comprehensive summary.
@@ -152,6 +152,7 @@ let updateInProgress = false;
 let availableUpdate = null;
 let dismissedUpdate = '';
 let enabledRevision = 0;
+let manualVisibilityRevision = 0;
 let enabledSaveChain = Promise.resolve();
 const SETTING_FIELDS = ['enabled', 'threshold', 'keepRecent', 'worldBookName', 'depth', 'mode', 'instructionPosition', 'instructionDepth', 'instructionRole'];
 const INSTRUCTION_POSITIONS = { tail: null, before: 2, after: 0, depth: 1 };
@@ -191,7 +192,6 @@ function unlockSending() {
 }
 
 function blockSendInput(event) {
-    if (!sendLockDepth) return;
     const target = event.target;
     const isSend = event.type === 'click' && target?.closest?.(SEND_CONTROL_SELECTOR);
     const isEnter = event.type === 'keydown' && target?.id === 'send_textarea'
@@ -201,6 +201,10 @@ function blockSendInput(event) {
     const fromChatInput = isEnter || isSubmit || (isSend && target.closest('#send_but'));
     const input = document.querySelector('#send_textarea');
     const command = input?.value?.trim() ?? '';
+    // Observe user intent without intercepting the native command. It also
+    // invalidates a pending check when /hide leaves the flags unchanged.
+    if (fromChatInput && /^\/(?:hide|unhide)(?:\s|$)/i.test(command)) manualVisibilityRevision += 1;
+    if (!sendLockDepth) return;
     // ST owns all slash parsing, including pipelines, macros, script controls
     // and commands added by other extensions. Never consume their input here.
     if (fromChatInput && command.startsWith('/')) return;
@@ -244,6 +248,7 @@ function applyEnabledState(value) {
 
 function summaryWasCancelled() {
     return Boolean(activeRun && (activeRun.cancelled
+        || activeRun.manualVisibilityRevision !== manualVisibilityRevision
         || (activeRun.automatic && (!settings.enabled || activeRun.enabledRevision !== enabledRevision))));
 }
 
@@ -341,6 +346,7 @@ async function prepareChatPreview(context, messages) {
             custom_prompt_post_processing: apiSettings.custom_prompt_post_processing,
             user_name: context.name1, char_name: context.name2,
         } };
+    const previousPreview = requestPreview;
     requestPreview = true;
     try {
         context.eventSource.makeLast?.('prompt_template_prepare', onTemplatePreviewContext);
@@ -348,7 +354,7 @@ async function prepareChatPreview(context, messages) {
         if (!Array.isArray(generate_data.messages)) throw new Error('主 API 提示词预览未返回消息列表。');
         return generate_data;
     } finally {
-        requestPreview = false;
+        requestPreview = previousPreview;
     }
 }
 
@@ -364,8 +370,11 @@ async function assemblePrompt(context) {
     if (promptProbe) throw new Error('正在组装另一份提示词，请稍后再试。');
     const probe = { data: null };
     promptProbe = probe;
+    const previousPreview = requestPreview;
+    requestPreview = true;
     try {
         refreshFinalHooks();
+        context.eventSource.makeLast?.('prompt_template_prepare', onTemplatePreviewContext);
         // Dry run assembles the preset, history and conditional world info,
         // without consuming the input box or sending a model request.
         await context.generate('normal', {}, true);
@@ -373,6 +382,7 @@ async function assemblePrompt(context) {
         return probe.data;
     } finally {
         promptProbe = null;
+        requestPreview = previousPreview;
     }
 }
 
@@ -863,6 +873,9 @@ function eligibleUncoveredRange(context, archiveInfo, manual) {
     const coveredTo = chat.length - keepRecent - 1;
     const coveredFrom = Math.max(0, (archiveInfo.archive.lastSummarizedThrough ?? -1) + 1);
     if (coveredTo < coveredFrom) return null;
+    // User-hidden history is excluded by ST. Do not start a summary solely to
+    // reapply a visibility rule to messages that the user already hid.
+    if (!chat.slice(coveredFrom, coveredTo + 1).some(message => !message.is_system && String(message.mes ?? '').trim())) return null;
     if (!manual && coveredTo - coveredFrom + 1 < 1) return null;
     return { coveredFrom, coveredTo, keepRecent };
 }
@@ -919,7 +932,7 @@ async function runLargeSummary({ manual = false } = {}) {
     setStatus('正在后台生成大总结，暂时暂停发送…');
     activeRun = {
         chatId: current.chatId, characterId: context.characterId, archiveId: null, committed: false,
-        automatic: !manual, cancelled: false, enabledRevision,
+        automatic: !manual, cancelled: false, enabledRevision, manualVisibilityRevision,
     };
     let toast = null;
     const showProgress = message => {
@@ -1136,13 +1149,16 @@ async function runLargeSummary({ manual = false } = {}) {
             window.toastr?.info?.('大总结保存成功；聊天已变化，没有隐藏楼层。', '喵喵大总结');
             return;
         }
+        const hideStart = range.coveredFrom;
         const hideEnd = Math.min(range.coveredTo, liveContext.chat.length - range.keepRecent - 1);
-        if (hideEnd >= 0) {
+        if (hideEnd >= hideStart) {
             setStatus('大总结已保存，正在隐藏旧楼层…');
             if (typeof liveContext.executeSlashCommandsWithOptions !== 'function') throw new Error('总结已保存，但酒馆缺少隐藏楼层接口。');
-            const result = await liveContext.executeSlashCommandsWithOptions(`/hide 0-${hideEnd}`);
+            // One operation for this new summary's range. Never re-hide the
+            // ranges from older rounds, or unhide the most recent floors.
+            const result = await liveContext.executeSlashCommandsWithOptions(`/hide ${hideStart}-${hideEnd}`);
             assertSummaryActive();
-            if (result?.isError || liveContext.chat.slice(0, hideEnd + 1).some(message => !message.is_system)) {
+            if (result?.isError || liveContext.chat.slice(hideStart, hideEnd + 1).some(message => !message.is_system)) {
                 throw new Error('总结已保存，但旧楼层未全部隐藏，请检查 /hide 命令。');
             }
         }
@@ -1195,6 +1211,7 @@ function onGenerationAfterCommands(type, _options, dryRun) {
     const current = getCharacterAndChat(context);
     pendingGeneration = canSummarize(context, true) && ['normal', 'continue'].includes(type) ? {
         token: ++generationToken, chatId: current.chatId, characterId: context.characterId,
+        manualVisibilityRevision,
         received: false, ended: false, locked: false,
     } : null;
 }
@@ -1214,7 +1231,9 @@ globalThis.meowLargeSummaryGenerationInterceptor = (_chat, _contextSize, abort, 
 async function checkAfterReply(pending) {
     thresholdCheckInProgress = true;
     const startEnabledRevision = enabledRevision;
+    const startVisibilityRevision = pending.manualVisibilityRevision ?? manualVisibilityRevision;
     const stillEnabled = () => settings.enabled && enabledRevision === startEnabledRevision
+        && manualVisibilityRevision === startVisibilityRevision
         && getContext()?.chatId === pending.chatId && getContext()?.characterId === pending.characterId;
     try {
         const context = getContext();
@@ -1324,6 +1343,7 @@ async function syncCurrentArchive() {
 
 function scheduleChatSync({ checkThreshold = true } = {}) {
     const revision = ++chatSyncRevision;
+    const startVisibilityRevision = manualVisibilityRevision;
     lockSending();
     setStatus('正在切换总结条目并检查当前存档…');
     const operation = chatSyncChain.catch(() => {}).then(async () => {
@@ -1338,10 +1358,10 @@ function scheduleChatSync({ checkThreshold = true } = {}) {
         if (revision !== chatSyncRevision) return;
         const context = getContext();
         const current = getCharacterAndChat(context);
-        if (checkThreshold && current && canSummarize(context, true)) {
+        if (checkThreshold && manualVisibilityRevision === startVisibilityRevision && current && canSummarize(context, true)) {
             await checkAfterReply({ chatId: current.chatId, characterId: context.characterId, onOpen: true, locked: false });
         } else {
-            setStatus(current ? '总结条目已同步。自动总结未启用。' : '请选择角色卡的聊天存档。');
+            setStatus(current ? `总结条目已同步。${settings.enabled ? '' : '自动总结未启用。'}` : '请选择角色卡的聊天存档。');
         }
     });
     chatSyncChain = operation.catch(error => {
