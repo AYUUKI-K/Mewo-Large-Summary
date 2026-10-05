@@ -1,0 +1,89 @@
+.als-settings {
+    margin: 0.5em 0;
+}
+
+.als-settings .inline-drawer-content {
+    gap: 0.65em;
+}
+
+.als-check {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+}
+
+.als-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(12em, 1fr));
+    gap: 0.6em;
+}
+
+.als-grid label,
+.als-prompt-label,
+.als-directory > label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25em;
+}
+
+.als-grid input,
+.als-prompt,
+.als-preview {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.als-prompt,
+.als-preview {
+    resize: vertical;
+    min-height: 7em;
+}
+
+.als-prompt {
+    min-height: 20em;
+}
+
+.als-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4em;
+}
+
+.als-directory {
+    border: 1px solid var(--SmartThemeBorderColor, #777);
+    border-radius: 0.4em;
+    padding: 0.6em;
+    max-height: 34em;
+    overflow: auto;
+}
+
+.als-card,
+.als-archive {
+    margin: 0.35em 0 0.35em 0.8em;
+}
+
+.als-card > summary,
+.als-archive > summary {
+    cursor: pointer;
+    padding: 0.3em 0;
+}
+
+.als-record {
+    display: flex;
+    align-items: center;
+    gap: 0.4em;
+    flex-wrap: wrap;
+    margin: 0.25em 0 0.25em 1.3em;
+}
+
+.als-record-title {
+    flex: 1 1 12em;
+}
+
+.als-muted {
+    opacity: 0.75;
+}
+
+.als-preview {
+    margin-top: 0.35em;
+}
