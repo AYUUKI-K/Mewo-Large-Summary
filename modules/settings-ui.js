@@ -33,6 +33,7 @@ export function settingsMarkup(version) {
           </div>
           <div class="als-notice"><span class="als-status-dot" aria-hidden="true"></span><div class="als-status" role="status" aria-live="polite">正在读取当前存档…</div></div>
           <div class="als-task-row"><div class="als-task-track"><span aria-hidden="true"></span><small class="als-task-state" role="status"></small></div><button type="button" class="menu_button als-cancel" hidden>取消本次任务</button></div>
+          <details class="als-live-result als-disclosure" hidden><summary>查看正在生成的正文</summary><div class="als-disclosure-body"><p class="als-help">完整结束后才会保存并隐藏旧消息；中断内容会留在概览中供复制。</p><textarea class="text_pole als-live-text" rows="6" readonly aria-label="正在生成的总结正文"></textarea></div></details>
 
           <div class="als-panel" id="als-panel-overview" data-panel="overview" role="tabpanel" aria-labelledby="als-tab-overview">
             <section class="als-overview">
@@ -44,7 +45,7 @@ export function settingsMarkup(version) {
                 <div class="als-range-ribbon" aria-hidden="true"><span class="als-range-old"></span><span class="als-range-recent"></span></div>
                 <div class="als-range-labels"><div><span class="als-range-key"><i></i>总结后隐藏</span><strong class="als-hide-count">—</strong><small class="als-hide-range"></small></div><div><span class="als-range-key als-range-key-recent"><i></i>保留原文</span><strong class="als-keep-count">—</strong><small class="als-keep-range"></small></div></div>
               </div>
-              <div class="als-runtime"><span class="als-runtime-mode"></span><span class="als-runtime-api"></span></div>
+              <div class="als-runtime"><span class="als-runtime-style"></span><span class="als-runtime-mode"></span><span class="als-runtime-api"></span></div>
               <p class="als-action-context als-muted"></p>
               <button type="button" class="menu_button als-primary als-run"><span>立即总结并隐藏旧消息</span>${uiIcon('arrow')}</button>
               <button type="button" class="menu_button als-compact">仅合并已有总结</button>
@@ -71,8 +72,13 @@ export function settingsMarkup(version) {
               <div class="als-grid"><label class="als-field">触发 token 数<input class="text_pole als-threshold" type="number" min="1" step="1000"></label><label class="als-field">保留最近消息条数<input class="text_pole als-keep" type="number" min="1" step="1"></label></div>
               <small class="als-keep-help als-help">20 条消息通常约为 10 轮问答；保留数量只决定隐藏边界。</small>
             </section>
-            <section class="als-form-section"><h4>总结方式</h4><label class="als-field">运行模式<select class="text_pole als-mode als-settings-mode"><option value="incremental">多次大总结</option><option value="merged">合并大总结</option></select></label><p class="als-mode-description als-help"></p></section>
+            <section class="als-form-section"><h4>总结方式</h4>
+              <div class="als-grid"><label class="als-field">提示词风格<select class="text_pole als-style als-settings-style"><option value="traditional">传统详述</option><option value="memory">结构记忆</option></select></label><label class="als-field">运行模式<select class="text_pole als-mode als-settings-mode"><option value="incremental">多次大总结</option><option value="merged">合并大总结</option></select></label></div>
+              <p class="als-style-description als-help"></p><p class="als-mode-description als-help"></p>
+            </section>
             <section class="als-form-section"><h4>API 与模型</h4><label class="als-field">总结使用的 API<select class="text_pole als-api-mode"><option value="main">主 API · 跟随当前酒馆连接</option><option value="secondary">副 API · OpenAI 兼容接口</option></select></label>
+              <label class="als-switch als-switch-row"><span><strong>流式接收总结</strong><small>显示实时进度与正文。仅影响总结；接口不支持时可关闭。</small></span><input class="als-stream-summary" type="checkbox" aria-label="流式接收总结"><span class="als-switch-track" aria-hidden="true"></span></label>
+              <p class="als-help">支持聊天补全主 API 和副 API；其他主 API 沿用完整响应。模型长时间无响应或中转缓冲时，流式仍可能超时。</p>
               <div class="als-secondary-settings" hidden><p class="als-help">只用于总结，不改变聊天连接。生成参数沿用当前预设。</p>
                 <label class="als-field">副 API 基础 URL<input class="text_pole als-secondary-url" type="url" placeholder="https://api.example.com/v1" autocomplete="off" spellcheck="false"></label>
                 <label class="als-field">副 API Key<input class="text_pole als-secondary-key" type="password" placeholder="无密钥服务可留空" autocomplete="new-password" spellcheck="false"></label>
@@ -93,11 +99,11 @@ export function settingsMarkup(version) {
           </div>
 
           <div class="als-panel" id="als-panel-prompt" data-panel="prompt" role="tabpanel" aria-labelledby="als-tab-prompt" hidden>
-            <div class="als-page-heading"><h3>决定哪些细节值得留下</h3><p>两种模式的模板分别保存，支持酒馆宏。</p></div>
-            <label class="als-field">编辑模板<select class="text_pole als-mode als-prompt-mode"><option value="incremental">多次大总结</option><option value="merged">合并大总结</option></select></label>
+            <div class="als-page-heading"><h3>决定哪些细节值得留下</h3><p>两套风格各有新增、合并模板，分别保存，支持酒馆宏。</p></div>
+            <div class="als-grid"><label class="als-field">编辑风格<select class="text_pole als-style als-prompt-style"><option value="traditional">传统详述</option><option value="memory">结构记忆</option></select></label><label class="als-field">编辑模式<select class="text_pole als-mode als-prompt-mode"><option value="incremental">多次大总结</option><option value="merged">合并大总结</option></select></label></div>
             <p class="als-prompt-context als-help"></p>
             <label class="als-prompt-label"><span class="als-editor-heading">总结指令 <span class="als-prompt-length"></span></span><textarea class="text_pole als-prompt" rows="15" spellcheck="false" aria-label="大总结提示词"></textarea></label>
-            <details class="als-disclosure als-prompt-help"><summary><span>编辑提示</span></summary><p class="als-help">可指定时间线、重要约定、人物关系及未解决事项。{{user}} 等宏会在发送时展开。这里切换的是编辑模板；实际运行模式在设置页修改。</p><button type="button" class="als-text-button als-prompt-reset">回到默认提示词</button></details>
+            <details class="als-disclosure als-prompt-help"><summary><span>编辑提示</span></summary><p class="als-help">传统详述沿用事件与角色表，结构记忆按六类信息整理。{{user}} 等宏会在发送时展开。此处切换只改变编辑对象；实际运行风格和模式在设置页选择并保存。恢复默认只影响正在编辑的一份模板，保存后生效。</p><button type="button" class="als-text-button als-prompt-reset">回到默认提示词</button></details>
             <div class="als-savebar"><small class="als-prompt-state" role="status">提示词已保存</small><div class="als-save-actions"><button type="button" class="menu_button als-prompt-discard">撤回修改</button><button type="button" class="menu_button als-primary als-prompt-save">保存修改提示词</button></div></div>
           </div>
 
