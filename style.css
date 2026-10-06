@@ -41,7 +41,8 @@
 .als-settings button:disabled { opacity: 0.38; cursor: not-allowed; }
 .als-settings .menu_button {
     display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-    margin: 0; min-width: 0; min-height: 40px; height: auto;
+    /* The host sets width: min-content, which stacks Chinese labels vertically. */
+    margin: 0; width: auto; max-width: 100%; min-width: 0; min-height: 40px; height: auto;
     padding: 8px 12px; border: 1px solid var(--als-control-line);
     border-radius: var(--als-radius-small); background: transparent;
     color: inherit; box-shadow: none; font-size: 13px; line-height: 1.5;
@@ -166,6 +167,7 @@
 .als-savebar[data-dirty="true"] { border-top-color: var(--als-bookmark); }
 .als-savebar[data-dirty="true"] > small { color: var(--als-ink); }
 .als-save-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 8px; }
+.als-settings .als-save-actions > .menu_button { width: 100%; white-space: nowrap; }
 .als-editor-heading { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .als-prompt-length { font-size: 11px; color: var(--als-ink-muted); font-variant-numeric: tabular-nums; }
 .als-settings .als-prompt { min-height: 320px; max-height: 65vh; resize: vertical; font-family: inherit; line-height: 1.8; tab-size: 2; }
@@ -224,6 +226,9 @@ body.als-send-locked :is(#send_but, #option_continue, #option_regenerate, .swipe
 .als-launcher-status { display: none; width: 12px; height: 12px; border: 2px solid var(--als-rule); border-top-color: var(--als-bookmark); border-radius: 50%; }
 .als-float-launcher:hover { border-color: var(--als-bookmark); }
 .als-float-launcher:active { border-color: var(--als-ink-muted); }
+.als-float-launcher, .als-floating-grip { touch-action: none; user-select: none; -webkit-user-select: none; }
+.als-float-launcher { cursor: grab; }
+.als-float-launcher:active { cursor: grabbing; }
 .als-launcher-count { font-size: 11px; font-variant-numeric: tabular-nums; color: var(--als-ink-muted); }
 .als-launcher-count:empty { display: none; }
 .als-launcher-paused .als-launcher-label { color: var(--als-ink-muted); }
@@ -250,6 +255,9 @@ body.als-send-locked :is(#send_but, #option_continue, #option_regenerate, .swipe
     .als-disclosure-note { display: none; }
     .als-model-state { flex-wrap: wrap; }
     .als-settings .als-model-fetch { width: 100%; }
+}
+@container als-panel (max-width: 280px) {
+    .als-save-actions { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 600px) {
     .als-settings .menu_button { min-height: 44px; }

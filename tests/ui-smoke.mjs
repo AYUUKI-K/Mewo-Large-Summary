@@ -16,7 +16,8 @@ const html = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name
 <style>
 *{box-sizing:border-box}body{margin:0;padding:16px;font:15px/1.5 system-ui;color:#e8e8ec;background:#202126;--SmartThemeBodyColor:#e8e8ec;--SmartThemeBlurTintColor:#202126;--SmartThemeBorderColor:#62636d;--SmartThemeQuoteColor:#91b5a9}
 main{width:100%;max-width:460px;margin:auto}h1{font-size:18px}button,input,select,textarea{font:inherit;color:inherit}button{cursor:pointer}
-.text_pole{background:#2b2d34;border:1px solid #686a74;border-radius:5px;padding:7px;width:100%}.menu_button{background:#383c48;border:1px solid #7d8290;border-radius:5px;padding:8px}
+/* Match ST 1.19's intrinsic button width so narrow Chinese labels catch host CSS conflicts. */
+.text_pole{background:#2b2d34;border:1px solid #686a74;border-radius:5px;padding:7px;width:100%}.menu_button{background:#383c48;border:1px solid #7d8290;border-radius:5px;padding:8px;width:min-content}
 button:disabled{opacity:.45;cursor:default}.inline-drawer-header{font-weight:600;padding:10px 0}.inline-drawer-content{display:flex;flex-direction:column}label{display:block}summary:focus-visible,button:focus-visible{outline:2px solid #b6ceff}#world_info{display:none}#send_textarea{width:100%;margin-top:20px}
 body.light{background:#f5f3ee;color:#303932;--SmartThemeBodyColor:#303932;--SmartThemeBlurTintColor:#f5f3ee;--SmartThemeBorderColor:#aaa99e;--SmartThemeQuoteColor:#527a68}.light .text_pole{background:white;color:inherit}.light .menu_button{background:#e8ebe6;color:inherit}
 #theme,#fixture-new{color:inherit;background:transparent;border:1px solid #777;border-radius:5px;padding:6px}#fixture-controls{margin:12px 0;font-size:12px}#fixture-controls label{margin:8px 0}

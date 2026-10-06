@@ -614,7 +614,7 @@ for (const mainApi of ['openai', 'kobold']) {
                 assert.equal(payload.custom_url, 'https://secondary.test/v1');
                 assert.equal(payload.stream, false);
                 assert.equal(init.signal, controller.signal);
-                const prompt = payload.messages.at(-1).content;
+                const prompt = payload.messages.map(message => message.content).join('\n');
                 assert.ok(prompt.includes(f.api.state().settings.prompt));
                 assert.equal(payload.tools, undefined);
                 return new Response(JSON.stringify({ choices: [{ message: { content: raw, reasoning_content: '不抓取此字段' } }] }));
@@ -1516,7 +1516,7 @@ test('disabling automatic summaries during the request discards the result', asy
     assert.equal(f.api.state().sendLockDepth, 0);
 });
 
-test('native quiet flow passes the interceptor, appends the prompt last, and filters raw reasoning', async () => {
+test('native quiet flow isolates the summary task, sends once, and filters raw reasoning', async () => {
     const f = await fixture();
     f.prepareSummary({ nativeRequest: true });
     const body = '<details><summary>大总结</summary>正文</details>';
@@ -1528,21 +1528,29 @@ test('native quiet flow passes the interceptor, appends the prompt last, and fil
         if (!url.includes('/chat-completions/generate')) return realFetch(url, init);
         modelCalls++;
         const payload = JSON.parse(init.body);
-        assert.equal(payload.messages.at(-1).content, f.api.state().settings.prompt);
-        assert.equal(payload.messages.at(-1).role, 'user');
+        assert.equal(payload.messages.length, 2);
+        assert.equal(payload.messages[0].role, 'system');
+        assert.ok(payload.messages[0].content.includes(f.api.state().settings.prompt));
+        assert.ok(!payload.messages[0].content.includes('roleplay-preset'));
+        assert.equal(payload.messages[1].role, 'user');
+        assert.ok(payload.messages[1].content.includes('roleplay-preset'));
+        assert.ok(payload.messages[1].content.includes('history'));
         assert.equal(payload.tools, undefined);
         return { ok: true, clone: () => ({ json: async () => ({ message: rawText }) }) };
     };
     const originalFetch = f.sandbox.fetch;
-    f.context.generate = async (type, _options, dryRun) => {
+    f.context.generate = async (type, options, dryRun) => {
         assert.equal(type, 'quiet');
+        assert.match(options.quiet_prompt, /不续写、重演或推进剧情/);
+        assert.equal(options.quietToLoud, false);
         assert.equal(dryRun, false);
         f.api.onGenerationAfterCommands(type, {}, dryRun);
         let aborted = false;
         f.interceptor([], 60000, () => { aborted = true; }, type);
         assert.equal(aborted, false);
-        const payload = { type, messages: [{ role: 'system', content: 'preset' }, { role: 'user', content: 'history' }], tools: [{}] };
+        const payload = { type, messages: [{ role: 'system', content: 'roleplay-preset' }, { role: 'user', content: 'history' }], tools: [{}], assistant_prefill: 'continue the story' };
         f.api.onMainApiRequest(payload);
+        assert.equal(payload.assistant_prefill, undefined);
         await f.sandbox.fetch('/api/backends/chat-completions/generate', { body: JSON.stringify(payload) });
         return ''; // Native output regex can filter a custom details format.
     };
@@ -1552,6 +1560,26 @@ test('native quiet flow passes the interceptor, appends the prompt last, and fil
     assert.equal(f.sandbox.fetch, originalFetch);
     assert.equal(f.api.state().sendLockDepth, 0);
 });
+
+for (const mixedOutput of [
+    '<!-- style note --><novel_header>新的一章</novel_header><content>旅行者又动身去了渡口。</content><details><summary>大总结</summary>两人约好明早见。</details>',
+    '<details><summary>大总结</summary>两人约好明早见。</details><UpdateVariable><JSONPatch>[{"op":"replace","path":"/time","value":"tomorrow"}]</JSONPatch></UpdateVariable>',
+]) {
+    test('mixed story or variable-update output is retained for review without saving or hiding', async () => {
+        const f = await fixture();
+        f.prepareSummary({ nativeRequest: true });
+        f.context.generate = async () => {
+            f.api.onMainApiRequest({ type: 'quiet', messages: [] });
+            return mixedOutput;
+        };
+        assert.notEqual(await f.api.runLargeSummary(), true);
+        assert.equal(f.writes.length, 0);
+        assert.equal(f.executed.length, 0);
+        assert.ok(f.notices.some(n => n.kind === 'error' && n.args[0].includes('剧情续写或变量更新')));
+        assert.equal(f.api.evaluate('incompleteResults.get("archive-a").content'), mixedOutput);
+        assert.equal(f.api.state().sendLockDepth, 0);
+    });
+}
 
 test('chat activation disables other archives and keeps recursion prevention on every owned entry', async () => {
     const f = await fixture();

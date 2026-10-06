@@ -84,9 +84,9 @@ export function settingsMarkup(version) {
             <details class="als-disclosure als-advanced"><summary>${uiIcon('tune')}<span>世界书与指令位置</span><span class="als-disclosure-note">高级设置</span></summary><div class="als-disclosure-body">
               <label class="als-field">世界书名称<input class="text_pole als-book" type="text" maxlength="80"></label>
               <label class="als-field">世界书插入深度<input class="text_pole als-depth" type="number" min="0" step="1"></label><p class="als-help">首次总结自动创建并挂载世界书，每个存档独立保存。</p>
-              <label class="als-field">总结指令插入位置<select class="text_pole als-instruction-position"><option value="tail">全部提示词尾部（默认）</option><option value="before">角色定义之前（↑ Char）</option><option value="after">角色定义之后（↓ Char）</option><option value="depth">聊天深度（@D）</option></select></label>
+              <label class="als-field">总结指令模式<select class="text_pole als-instruction-position"><option value="tail">独立总结任务（默认）</option><option value="before">角色定义之前（↑ Char）</option><option value="after">角色定义之后（↓ Char）</option><option value="depth">聊天深度（@D）</option></select></label>
               <div class="als-grid"><label class="als-field als-instruction-depth-field" hidden>指令深度<input class="text_pole als-instruction-depth" type="number" min="0" max="10000" step="1"></label><label class="als-field als-instruction-role-field" hidden>指令角色<select class="text_pole als-instruction-role"><option value="0">system（系统）</option><option value="1">user（用户）</option><option value="2">assistant（助手）</option></select></label></div>
-              <p class="als-help">指令位置影响生成总结的请求，世界书深度影响保存后的注入。</p>
+              <p class="als-help">默认将完整上下文作为资料，独立执行总结，避免续写预设干扰；其他选项沿用原生位置注入。世界书深度只影响保存后的记忆注入。</p>
               <button type="button" class="als-text-button als-settings-reset">回到默认设置</button>
             </div></details>
             <div class="als-savebar"><small class="als-settings-state" role="status">设置已保存</small><div class="als-save-actions"><button type="button" class="menu_button als-settings-discard">撤回修改</button><button type="button" class="menu_button als-primary als-settings-save">保存设置</button></div></div>
