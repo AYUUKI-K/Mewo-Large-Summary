@@ -1,3 +1,12 @@
+export function summaryOutputFailure(text) {
+    // Recognize full roleplay output, not ordinary prose or custom summary markup.
+    if (/<novel_header\b[^>]*>[\s\S]*?<\/novel_header\s*>[\s\S]*?<content\b[^>]*>[\s\S]*?<\/content\s*>/i.test(text)
+        || /<UpdateVariable\b[^>]*>[\s\S]*?<JSONPatch\b[^>]*>[\s\S]*?<\/JSONPatch\s*>[\s\S]*?<\/UpdateVariable\s*>/i.test(text)) {
+        return '模型回复混入了剧情续写或变量更新，未得到纯总结';
+    }
+    return null;
+}
+
 export function completionFailure(response) {
     const reason = String(response?.choices?.[0]?.finish_reason ?? response?.stop_reason
         ?? response?.candidates?.[0]?.finishReason ?? response?.incomplete_details?.reason ?? '').toLowerCase();

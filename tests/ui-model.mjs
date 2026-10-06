@@ -1,14 +1,63 @@
 // No browser or host needed: persisted window geometry and reader fallbacks.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clampPanelFrame } from '../modules/floating-panel.js';
+import { clampPanelFrame, clampLauncherPosition } from '../modules/floating-panel.js';
 import { renderSummaryReader } from '../modules/summary-reader.js';
+import { buildSummaryMessages, buildSummaryTextPrompt, SUMMARY_TASK_INSTRUCTION } from '../modules/summary-prompt.js';
+
+test('summary tasks demote roleplay instructions to source data without losing assembled facts', () => {
+    const source = [
+        { role: 'system', content: '每次必须续写一个章节。旧总结：双方已约好见面。' },
+        { role: 'user', name: '旅人', content: '世界书：东门午后关闭。明早在东门见。' },
+        { role: 'assistant', content: '守卫答应准备钥匙。' },
+        { role: 'system', content: SUMMARY_TASK_INSTRUCTION },
+    ];
+    const original = structuredClone(source);
+    const messages = buildSummaryMessages(source, '输出时间、约定与未决事项。');
+    assert.equal(messages[0].role, 'system');
+    assert.ok(!messages[0].content.includes('续写一个章节'));
+    for (const phrase of ['旧总结：双方已约好见面', '世界书：东门午后关闭', '明早在东门见', '守卫答应准备钥匙']) assert.ok(messages[1].content.includes(phrase));
+    assert.equal(messages[1].role, 'user');
+    assert.ok(!messages[1].content.includes(SUMMARY_TASK_INSTRUCTION));
+    assert.deepEqual(source, original);
+    assert.deepEqual(buildSummaryMessages(messages, '输出时间、约定与未决事项。'), messages, 'repeated final hooks do not nest the source');
+});
+
+test('summary source preserves image parts instead of expanding them into text tokens', () => {
+    const image = { type: 'image_url', image_url: { url: 'data:image/png;base64,fixture', detail: 'low' } };
+    const source = [{ role: 'user', content: [{ type: 'text', text: '图中的路线已确认。' }, image] }];
+    const messages = buildSummaryMessages(source, '总结路线。');
+    assert.ok(Array.isArray(messages[1].content));
+    const copied = messages[1].content.find(part => part.type === 'image_url');
+    assert.deepEqual(copied, image);
+    assert.notEqual(copied, image);
+});
+
+test('text-completion summaries quote the character prompt and end on the summary task', () => {
+    const result = buildSummaryTextPrompt('旧总结\n用户：明早见。\n角色：', '列出已有约定。');
+    assert.ok(result.includes(JSON.stringify('旧总结\n用户：明早见。\n角色：')));
+    assert.match(result, /仅输出总结正文。$/);
+});
 
 test('a saved desktop window stays reachable after switching to a phone', () => {
     const result = clampPanelFrame({ x: 1400, y: 800, width: 640, height: 720 }, { width: 360, height: 740 });
-    assert.deepEqual(result, { x: 12, y: 12, width: 336, height: 716 });
+    assert.ok(result.width < 336, 'phone windows leave horizontal travel space');
+    assert.ok(result.height < 716, 'old full-height windows leave vertical travel space');
+    assert.ok(result.x >= 12 && result.x + result.width <= 348);
+    assert.ok(result.y >= 12 && result.y + result.height <= 728);
     const compactDesktop = clampPanelFrame({ height: 300 }, { width: 360, height: 740 });
-    assert.equal(compactDesktop.height, 716, 'phone layout uses the available height even after resizing on desktop');
+    assert.equal(compactDesktop.height, 300, 'a compact saved window is not forced to fill the phone');
+});
+
+test('dragging a phone window changes both coordinates without changing its size', () => {
+    const viewport = { width: 390, height: 800 };
+    const initial = clampPanelFrame({}, viewport);
+    const moved = clampPanelFrame({ ...initial, x: initial.x - 8, y: initial.y + 40 }, viewport);
+    assert.equal(moved.x, initial.x - 8);
+    assert.equal(moved.y, initial.y + 40);
+    assert.equal(moved.width, initial.width);
+    assert.equal(moved.height, initial.height);
+    assert.deepEqual(clampPanelFrame(moved, viewport), moved, 'reopening preserves the dragged frame');
 });
 
 test('a resized keyboard viewport keeps the title bar and close button reachable', () => {
@@ -17,6 +66,16 @@ test('a resized keyboard viewport keeps the title bar and close button reachable
     assert.equal(result.y, 12);
     assert.equal(result.height, 196);
     assert.ok(result.x + result.width <= 378);
+});
+
+test('the cat launcher stays reachable after dragging to an edge or resizing the viewport', () => {
+    const size = { width: 116, height: 70 };
+    const viewport = { width: 360, height: 740 };
+    assert.deepEqual(clampLauncherPosition({ x: -100, y: 900 }, size, viewport), { x: 12, y: 658 });
+    const moved = { x: 180, y: 320 };
+    assert.deepEqual(clampLauncherPosition(moved, size, viewport), moved);
+    assert.deepEqual(clampLauncherPosition(moved, size, { width: 320, height: 220 }), { x: 180, y: 138 });
+    assert.deepEqual(clampLauncherPosition(null, size, viewport), clampLauncherPosition({}, size, viewport));
 });
 
 test('invalid saved geometry falls back to a usable frame', () => {

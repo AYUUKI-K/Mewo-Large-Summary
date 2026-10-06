@@ -7,11 +7,12 @@ import { activeRecords, archiveTransition, branchRecords, combineRecords, consec
 import { readWorldBook, saveVerifiedBook } from './modules/world-book.js';
 import { setTaskStage, taskLabel } from './modules/task-state.js';
 import { fetchJson } from './modules/network.js';
-import { completionFailure, promptContainsText } from './modules/generation-validation.js';
+import { completionFailure, promptContainsText, summaryOutputFailure } from './modules/generation-validation.js';
+import { buildSummaryMessages, buildSummaryTextPrompt, SUMMARY_TASK_INSTRUCTION } from './modules/summary-prompt.js';
 
 const MODULE_NAME = 'auto_large_summary';
 const ENTRY_MARKER = 'auto_large_summary';
-const EXTENSION_VERSION = '1.2.1';
+const EXTENSION_VERSION = '1.2.2';
 const SUMMARY_INJECTION_ID = 'meow_large_summary_instruction';
 
 let settings;
@@ -364,18 +365,6 @@ function assertSummaryActive() {
     if (summaryWasCancelled()) throw new Error('本次总结已取消。');
 }
 
-// The default tail is applied after preset/EJS assembly. Other positions use
-// ST's own extension injection API during native context preparation.
-function appendSummaryTail(messages) {
-    if (!summaryRequest || summaryRequest.position !== 'tail' || !Array.isArray(messages)) return;
-    for (let i = messages.length - 1; i >= 0; i--) {
-        if (summaryRequest.tailMessages.has(messages[i])) messages.splice(i, 1);
-    }
-    const tail = { role: 'user', content: summaryRequest.prompt };
-    summaryRequest.tailMessages.add(tail);
-    messages.push(tail);
-}
-
 function onFinalPromptData(data, dryRun) {
     if (!dryRun && summaryRequest?.native) {
         if (summaryWasCancelled() || !isSameArchive(getContext(), summaryRequest.archiveInfo, summaryRequest.characterId)) {
@@ -388,8 +377,8 @@ function onFinalPromptData(data, dryRun) {
                 if (typeof data.prompt === 'string') data.prompt = summaryRequest.prompt;
                 else if (typeof data.input === 'string') data.input = summaryRequest.prompt;
             } else if (summaryRequest.position === 'tail') {
-                if (typeof data.prompt === 'string') data.prompt += `\n\n${summaryRequest.prompt}`;
-                else if (typeof data.input === 'string') data.input += `\n\n${summaryRequest.prompt}`;
+                if (typeof data.prompt === 'string') data.prompt = buildSummaryTextPrompt(data.prompt, summaryRequest.prompt);
+                else if (typeof data.input === 'string') data.input = buildSummaryTextPrompt(data.input, summaryRequest.prompt);
             }
             summaryRequest.expectedBody = JSON.stringify(data);
             summaryRequest.sent = true;
@@ -407,11 +396,14 @@ function onMainApiRequest(data) {
             return;
         }
         if (summaryRequest.sourceOnly) data.messages = [{ role: 'user', content: summaryRequest.prompt }];
-        else appendSummaryTail(data.messages);
+        // Keep the host's assembled facts, but do not execute its roleplay preset
+        // as system instructions while asking for a historical summary.
+        else if (summaryRequest.position === 'tail') data.messages = buildSummaryMessages(data.messages, summaryRequest.prompt);
         // Quiet requests use the current connection, model and preset; tools
         // cannot replace the requested textual summary with a tool invocation.
         delete data.tools;
         delete data.tool_choice;
+        delete data.assistant_prefill;
         if (summaryRequest.secondary) {
             // Set the destination in the owned request object as well as the
             // fetch adapter. A later hook cannot silently fall back to the
@@ -746,7 +738,7 @@ async function requestMainApiSummary(context, prompt, { sourceOnly = false } = {
     assertSummaryActive();
     const request = {
         prompt, position: settings.instructionPosition, archiveInfo, characterId: context.characterId,
-        tailMessages: new WeakSet(), native: true, afterCommands: true, sending: true, sent: false,
+        native: true, afterCommands: true, sending: true, sent: false,
         expectedBody: null, rawText: null, cancelled: false,
         secondary, sourceOnly,
     };
@@ -815,7 +807,7 @@ async function requestMainApiSummary(context, prompt, { sourceOnly = false } = {
         refreshFinalHooks();
         // Use the actual quiet generation flow: regex, world info, extension
         // interceptors, EJS conditions, presets and current main API all run.
-        const response = await context.generate('quiet', {}, false);
+        const response = await context.generate('quiet', { quiet_prompt: SUMMARY_TASK_INSTRUCTION, quietToLoud: false }, false);
         assertSummaryActive();
         if (request.cancelled || !isSameArchive(getContext(), archiveInfo, context.characterId)) {
             throw new Error('生成期间聊天存档已切换，本次总结已取消。');
@@ -824,6 +816,7 @@ async function requestMainApiSummary(context, prompt, { sourceOnly = false } = {
             ? '喵，副 API 总结还没进入酒馆发送流程，请先保持酒馆当前主连接可用，再试一次。'
             : '酒馆没有发出大总结请求，请确认主 API 已连接。');
         const text = stripReasoning(request.rawText ?? extractSummaryText(response), reasoningTemplate);
+        request.failure ??= summaryOutputFailure(text);
         if (request.failure) {
             if (text) incompleteResults.set(archiveInfo.archive.archiveId, { content: text, reason: request.failure });
             throw new Error(`${request.failure}；未覆盖总结，也未隐藏消息。${text ? '可在概览查看本页暂存的未完成结果。' : ''}`);
