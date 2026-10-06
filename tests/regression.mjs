@@ -4,6 +4,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { SourceTextModule, SyntheticModule, createContext } from 'node:vm';
+import { DEFAULT_PROMPT, DEFAULT_MERGED_PROMPT } from '../modules/settings.js';
+import { PREVIOUS_DEFAULT_PROMPT, PREVIOUS_DEFAULT_MERGED_PROMPT, LEGACY_DEFAULT_PROMPT } from '../modules/legacy-prompts.js';
 
 const source = await readFile(process.env.MEOW_TEST_SOURCE || new URL('../index.js', import.meta.url), 'utf8');
 const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
@@ -20,9 +22,11 @@ async function fixture(savedSettings = {}) {
     const savedPreferences = [];
     const controls = new Map();
     const control = () => ({ disabled: false, getAttribute: () => null, setAttribute() {}, removeAttribute() {} });
-    for (const selector of ['.als-status', '.als-settings-state', '.als-instruction-depth-field', '.als-instruction-role-field', '.als-delete-round', '.als-history-select', '.als-prompt', '.als-prompt-mode', '.als-settings-mode', '.als-mode-description', '.als-prompt-state', '.als-model-status', '.als-model-fetch']) controls.set(selector, control());
+    for (const selector of ['.als-status', '.als-settings-state', '.als-instruction-depth-field', '.als-instruction-role-field', '.als-delete-round', '.als-history-select', '.als-prompt', '.als-prompt-mode', '.als-prompt-style', '.als-settings-mode', '.als-settings-style', '.als-mode-description', '.als-prompt-state', '.als-model-status', '.als-model-fetch']) controls.set(selector, control());
     for (const selector of ['.als-enabled', '.als-auto-enabled', '.als-threshold', '.als-keep', '.als-book', '.als-depth', '.als-instruction-position', '.als-instruction-depth', '.als-instruction-role', '.als-api-mode', '.als-secondary-url', '.als-secondary-key', '.als-secondary-model', '.als-secondary-settings', '.als-preview-box', '.als-action-context', '.als-last-operation', '.als-task-state', '.als-cancel', '.als-compact', '.als-rebuild', '.als-retry-hide', '.als-restore', '.als-undo']) controls.set(selector, control());
     const handlers = new Map();
+    for (const selector of ['.als-stream-summary', '.als-live-result', '.als-live-text', '.als-incomplete-result', '.als-incomplete-text', '.als-incomplete-reason']) controls.set(selector, control());
+    controls.get('.als-stream-summary').type = 'checkbox';
     controls.get('.als-history-select').value = 'all';
     const input = { id: 'send_textarea', value: '', dispatchEvent() {} };
     const send = { ...control(), id: 'send_but', closest: () => send };
@@ -73,7 +77,7 @@ async function fixture(savedSettings = {}) {
     const openai = { promptManager: { render: value => tokenRenders.push(value) } };
     const regex = { getRegexedString: text => context.stripSummaryForTest ? '' : text, regex_placement: { WORLD_INFO: 5 } };
     const sandbox = createContext({
-        console: { ...console, error() {}, warn() {} }, structuredClone, setTimeout, clearTimeout, setInterval, clearInterval, URL, Response, AbortController, AbortSignal,
+        console: { ...console, error() {}, warn() {} }, structuredClone, setTimeout, clearTimeout, setInterval, clearInterval, URL, Response, AbortController, AbortSignal, TextDecoder,
         location: { origin: 'http://st.local' },
         crypto: { randomUUID: () => 'archive-a' },
         window: {
@@ -113,7 +117,7 @@ async function fixture(savedSettings = {}) {
         onGenerationAfterCommands, onMainApiRequest, onFinalPromptData, onTemplatePreviewContext,
         assemblePrompt, countAssembledPrompt, runLargeSummary, checkAfterReply, stripReasoning, isSameArchive,
         installVisibilityCommandHooks, refreshVisibilityTokens, getSecondaryConfig, buildSecondaryRequest, fetchSecondaryModels,
-        savePromptDraft, syncPromptEditor, changeMode, persistSettingsNow, saveSettingsDraft, onExtensionUpdate,
+        savePromptDraft, syncPromptEditor, changeMode, changePromptStyle, persistSettingsNow, saveSettingsDraft, onExtensionUpdate,
         evaluate: code => eval(code),
         state: () => ({ sendLockDepth, runInProgress, thresholdCheckInProgress, pendingGeneration, settings })
     };`, {
@@ -393,17 +397,18 @@ test('upgrading legacy settings preserves custom prompts and repairs missing tem
     assert.equal(legacy.api.state().settings.prompts.incremental, '用户原来的旧模板\n{{char}}');
     const partial = await fixture({ prompts: { incremental: '新模板', merged: 123 }, apiMode: 'invalid' });
     assert.equal(partial.api.state().settings.prompts.incremental, '新模板');
-    assert.match(partial.api.state().settings.prompts.merged, /全文大总结/);
+    assert.equal(partial.api.state().settings.prompts.merged, DEFAULT_MERGED_PROMPT);
     assert.equal(partial.api.state().settings.apiMode, 'main');
     const defaults = await fixture();
-    assert.match(defaults.api.state().settings.prompts.incremental, /开始执行\*\*新增大总结\*\*/);
-    assert.match(defaults.api.state().settings.prompts.merged, /严禁输出<moew_FM>摘要/);
+    assert.equal(defaults.api.state().settings.prompts.incremental, DEFAULT_PROMPT);
+    assert.equal(defaults.api.state().settings.prompts.merged, DEFAULT_MERGED_PROMPT);
+    assert.equal(defaults.api.state().settings.promptStyle, 'traditional');
 });
 
 test('both default templates use the native user macro instead of a fixed persona name', async () => {
     const f = await fixture();
-    for (const template of Object.values(f.api.state().settings.prompts)) {
-        assert.equal((template.match(/关键角色和\{\{user\}\}之间的情感变化/g) ?? []).length, 2);
+    for (const template of [...Object.values(f.api.state().settings.prompts), ...Object.values(f.api.state().settings.memoryPrompts)]) {
+        assert.ok(template.includes('{{user}}'));
         assert.ok(!template.includes('结城爱'));
         assert.ok(!template.includes('<user>'));
     }
@@ -440,6 +445,56 @@ test('default-name migration keeps customized templates unchanged even if they m
     assert.equal(f.api.state().settings.prompts.merged, merged);
 });
 
+test('saved default task openings migrate once in both modes and stay removed after reload', async () => {
+    for (const named of [false, true]) {
+        const f = await fixture();
+        const defaults = structuredClone(f.api.state().settings.prompts);
+        const previous = { incremental: PREVIOUS_DEFAULT_PROMPT, merged: PREVIOUS_DEFAULT_MERGED_PROMPT };
+        const old = Object.fromEntries(Object.entries(previous).map(([mode, template]) => {
+            const opening = `停止剧情，停止输出其他所有内容，开始执行**${mode === 'merged' ? '全文' : '新增'}大总结**`;
+            const previous = `${opening}\n\n${named ? template.replaceAll('{{user}}', '结城爱') : template}`;
+            return [mode, ` \r\n${previous.replaceAll('\n', '\r\n')}\r\n `];
+        }));
+        f.api.state().settings.prompts = old;
+        f.api.state().settings.mode = 'merged';
+        let saves = 0;
+        f.context.saveSettingsDebounced = () => { saves++; };
+        f.api.getSettings();
+        for (const mode of ['incremental', 'merged']) {
+            assert.equal(f.api.state().settings.prompts[mode], ` \r\n${defaults[mode].replaceAll('\n', '\r\n')}\r\n `);
+        }
+        assert.equal(f.api.state().settings.prompt, f.api.state().settings.prompts.merged);
+        f.api.getSettings();
+        assert.equal(saves, 1, 'one migration save, with no repeated writes');
+        await f.api.persistSettingsNow();
+        const reloaded = await fixture(f.savedPreferences.at(-1).auto_large_summary);
+        assert.deepEqual(structuredClone(reloaded.api.state().settings.prompts), structuredClone(f.api.state().settings.prompts));
+        const legacy = await fixture({ prompt: old.incremental });
+        assert.equal(legacy.api.state().settings.prompt, f.api.state().settings.prompts.incremental);
+    }
+});
+
+test('1.2.3 defaults migrate to the revised traditional style without selecting memory style', async () => {
+    const f = await fixture({ prompts: { incremental: PREVIOUS_DEFAULT_PROMPT, merged: PREVIOUS_DEFAULT_MERGED_PROMPT } });
+    assert.equal(f.api.state().settings.prompts.incremental, DEFAULT_PROMPT);
+    assert.equal(f.api.state().settings.prompts.merged, DEFAULT_MERGED_PROMPT);
+    assert.equal(f.api.state().settings.promptStyle, 'traditional');
+    assert.equal(f.api.state().settings.prompt, DEFAULT_PROMPT);
+    const legacy = await fixture({ prompt: LEGACY_DEFAULT_PROMPT });
+    assert.equal(legacy.api.state().settings.prompt, DEFAULT_PROMPT);
+});
+
+test('removing default task openings leaves customized prompts and saved summary content intact', async () => {
+    const defaults = await fixture();
+    const incremental = `停止剧情，停止输出其他所有内容，开始执行**新增大总结**\n\n${defaults.api.state().settings.prompt}\n这是我的额外要求`;
+    const merged = '停止剧情，停止输出其他所有内容，开始执行**全文大总结**\n\n只保留约定与物品。';
+    const f = await fixture({ prompts: { incremental, merged } });
+    assert.equal(f.api.state().settings.prompts.incremental, incremental);
+    assert.equal(f.api.state().settings.prompts.merged, merged);
+    assert.equal(f.writes.length, 0);
+    assert.equal(f.executed.length, 0);
+});
+
 test('both summary modes expand the user macro through ST before sending while preserving the saved template', async () => {
     for (const mode of ['incremental', 'merged']) {
         const f = await fixture({ mode });
@@ -452,7 +507,7 @@ test('both summary modes expand the user macro through ST before sending while p
             return text.replaceAll('{{user}}', '当前用户角色');
         };
         f.sandbox.__fixtures.capture = prompt => {
-            assert.equal((prompt.match(/关键角色和当前用户角色之间/g) ?? []).length, 2);
+            assert.ok(prompt.includes('当前用户角色'));
             assert.ok(!prompt.includes('{{user}}'));
             assert.ok(!prompt.includes('结城爱'));
             return '<details><summary>大总结</summary>事件记录</details>';
@@ -462,6 +517,91 @@ test('both summary modes expand the user macro through ST before sending while p
         assert.equal(calls, 1);
         assert.equal(f.api.state().settings.prompt, template);
         assert.ok(f.api.state().settings.prompt.includes('{{user}}'));
+    }
+});
+
+test('four style/mode templates save separately and editor selection never switches the running template', async () => {
+    const f = await fixture();
+    for (const style of ['traditional', 'memory']) {
+        f.api.changePromptStyle(style);
+        for (const mode of ['incremental', 'merged']) {
+            f.api.changeMode(mode);
+            f.controls.get('.als-prompt').value = `${style}/${mode}\n{{user}} 自定义要求`;
+            await f.api.savePromptDraft();
+        }
+    }
+    assert.equal(f.api.state().settings.promptStyle, 'traditional');
+    assert.equal(f.api.state().settings.mode, 'incremental');
+    assert.equal(f.api.state().settings.prompt, 'traditional/incremental\n{{user}} 自定义要求');
+    const reloaded = await fixture(f.savedPreferences.at(-1).auto_large_summary);
+    for (const style of ['traditional', 'memory']) {
+        reloaded.api.changePromptStyle(style);
+        for (const mode of ['incremental', 'merged']) {
+            reloaded.api.changeMode(mode);
+            assert.equal(reloaded.controls.get('.als-prompt').value, `${style}/${mode}\n{{user}} 自定义要求`);
+        }
+    }
+    reloaded.api.evaluate('scheduleChatSync = async () => {}; settingsDraft.promptStyle = "memory"; settingsDraft.mode = "merged";');
+    await reloaded.api.saveSettingsDraft();
+    assert.equal(reloaded.api.state().settings.prompt, 'memory/merged\n{{user}} 自定义要求');
+    const again = await fixture(reloaded.savedPreferences.at(-1).auto_large_summary);
+    assert.equal(again.api.state().settings.promptStyle, 'memory');
+    assert.equal(again.api.state().settings.prompt, 'memory/merged\n{{user}} 自定义要求');
+});
+
+test('failed memory-template saves preserve both saved styles and retain the draft for retry', async () => {
+    const f = await fixture();
+    f.api.changePromptStyle('memory');
+    const previous = f.api.state().settings.memoryPrompts.incremental;
+    const active = f.api.state().settings.prompt;
+    f.controls.get('.als-prompt').value = '结构记忆的未保存修改';
+    f.context.suppressSaveConfirmation = true;
+    await f.api.savePromptDraft();
+    assert.equal(f.api.state().settings.memoryPrompts.incremental, previous);
+    assert.equal(f.api.state().settings.prompt, active);
+    f.api.changePromptStyle('traditional');
+    f.api.changePromptStyle('memory');
+    assert.equal(f.controls.get('.als-prompt').value, '结构记忆的未保存修改');
+    f.context.suppressSaveConfirmation = false;
+    await f.api.savePromptDraft();
+    assert.equal(f.savedPreferences.at(-1).auto_large_summary.memoryPrompts.incremental, '结构记忆的未保存修改');
+    assert.equal(f.savedPreferences.at(-1).auto_large_summary.prompt, active);
+});
+
+test('failed style activation rolls back the active prompt without erasing either template set', async () => {
+    const f = await fixture({ prompts: { incremental: '传统新增', merged: '传统合并' }, memoryPrompts: { incremental: '结构新增', merged: '结构合并' } });
+    f.api.evaluate('scheduleChatSync = async () => {}; settingsDraft.promptStyle = "memory";');
+    f.context.suppressSaveConfirmation = true;
+    await f.api.saveSettingsDraft();
+    assert.equal(f.api.state().settings.promptStyle, 'traditional');
+    assert.equal(f.api.state().settings.prompt, '传统新增');
+    assert.equal(f.api.state().settings.memoryPrompts.incremental, '结构新增');
+    assert.equal(f.api.evaluate('settingsDraft.promptStyle'), 'memory');
+    f.context.suppressSaveConfirmation = false;
+    await f.api.saveSettingsDraft();
+    assert.equal(f.api.state().settings.prompt, '结构新增');
+});
+
+test('normal summaries and source-only compaction use the saved style, not unsaved style drafts', async () => {
+    for (const style of ['traditional', 'memory']) {
+        const f = await fixture({ promptStyle: style,
+            prompts: { incremental: '传统新增', merged: '传统合并' },
+            memoryPrompts: { incremental: '结构新增', merged: '结构合并' } });
+        f.prepareSummary();
+        f.api.evaluate(`settingsDraft.promptStyle = '${style === 'memory' ? 'traditional' : 'memory'}';`);
+        const expected = style === 'memory' ? '结构' : '传统';
+        let calls = 0;
+        f.sandbox.__fixtures.capture = (prompt, options) => {
+            calls++;
+            assert.ok(prompt.includes(expected + (options.sourceOnly ? '合并' : '新增')));
+            return `结果 ${calls}`;
+        };
+        f.api.evaluate('requestMainApiSummary = async (_context, prompt, options) => __fixtures.capture(prompt, options);');
+        assert.equal(await f.api.runLargeSummary(), true);
+        assert.equal(bookEntry(f).extensions.auto_large_summary.records.at(-1).promptStyle, style);
+        assert.equal(await f.api.runLargeSummary({ operation: 'compact' }), true);
+        assert.equal(calls, 2);
+        assert.equal(bookEntry(f).content, '结果 2');
     }
 });
 
@@ -612,8 +752,8 @@ for (const mainApi of ['openai', 'kobold']) {
                 const payload = JSON.parse(init.body);
                 assert.equal(payload.model, 'selected-model');
                 assert.equal(payload.custom_url, 'https://secondary.test/v1');
-                assert.equal(payload.stream, false);
-                assert.equal(init.signal, controller.signal);
+                assert.equal(payload.stream, true);
+                assert.equal(init.signal.aborted, false);
                 const prompt = payload.messages.map(message => message.content).join('\n');
                 assert.ok(prompt.includes(f.api.state().settings.prompt));
                 assert.equal(payload.tools, undefined);
@@ -1427,7 +1567,7 @@ test('automatic summary displays progress/success, verifies save, then hides and
     assert.equal(entry.constant, true);
     assert.equal(entry.disable, false);
     assert.equal(f.executed[0], '/hide 0-9');
-    assert.ok(f.notices.some(n => n.kind === 'info' && n.args[0].includes('正在大总结中') && n.args[2].timeOut === 0));
+    assert.ok(f.notices.some(n => n.kind === 'info' && n.args[0].includes('正在大总结中') && n.args[2].timeOut > 0));
     assert.ok(f.notices.some(n => n.kind === 'success' && n.args[0].includes('保存成功')));
     assert.equal(f.api.state().sendLockDepth, 0);
     assert.equal(f.api.state().runInProgress, false);
@@ -1536,7 +1676,7 @@ test('native quiet flow isolates the summary task, sends once, and filters raw r
         assert.ok(payload.messages[1].content.includes('roleplay-preset'));
         assert.ok(payload.messages[1].content.includes('history'));
         assert.equal(payload.tools, undefined);
-        return { ok: true, clone: () => ({ json: async () => ({ message: rawText }) }) };
+        return new Response(JSON.stringify({ message: rawText }));
     };
     const originalFetch = f.sandbox.fetch;
     f.context.generate = async (type, options, dryRun) => {
@@ -2043,6 +2183,102 @@ for (const apiMode of ['main', 'secondary']) {
         assert.equal(f.api.state().sendLockDepth, 0);
     });
 }
+
+for (const apiMode of ['main', 'secondary']) {
+    for (const outcome of ['complete', 'disconnect', 'cancel', 'length', 'switch-chat']) {
+        test(`${apiMode} live stream ${outcome}: one request, visible progress, atomic save and safe partial retention`, async () => {
+            const f = await fixture({ apiMode, secondaryUrl: 'https://secondary.test/v1', secondaryModel: 'chosen' });
+            f.prepareSummary({ nativeRequest: true });
+            let controller, calls = 0, cancelled = false;
+            const encoder = new TextEncoder();
+            const event = value => encoder.encode(`data: ${typeof value === 'string' ? value : JSON.stringify(value)}\n\n`);
+            const partial = '<details><summary>大总结</summary>守卫保管钥匙。';
+            const fetchBefore = f.sandbox.fetch;
+            f.sandbox.fetch = async (url, init) => {
+                if (!url.includes('/generate')) return fetchBefore(url, init);
+                calls++;
+                assert.equal(JSON.parse(init.body).stream, true);
+                assert.equal(JSON.parse(init.body).n, 1);
+                return new Response(new ReadableStream({ start(c) {
+                    controller = c;
+                    c.enqueue(event({ choices: [{ delta: { reasoning_content: '私有推理', content: `<star_cot>内联推理</star_cot>${partial}` } }] }));
+                }, cancel() { cancelled = true; } }), { headers: { 'Content-Type': 'text/event-stream' } });
+            };
+            const ownedFetch = f.sandbox.fetch;
+            f.context.generate = async () => {
+                const payload = { type: 'quiet', stream: false, messages: [{ role: 'user', content: '成年旅人与守卫约定东门集合。' }] };
+                f.api.onMainApiRequest(payload);
+                assert.equal(payload.stream, false); // Wire-only override leaves native quiet semantics intact.
+                try {
+                    const response = await f.sandbox.fetch('/api/backends/chat-completions/generate', { body: JSON.stringify(payload) });
+                    return (await response.json()).choices[0].message.content;
+                } catch { return ''; } // ST may consume a transport error itself.
+            };
+            const pending = f.api.runLargeSummary();
+            for (let i = 0; i < 100 && !f.api.evaluate('activeRun?.stream?.chars'); i++) await new Promise(resolve => setTimeout(resolve, 2));
+            assert.equal(f.api.evaluate('activeRun.stream.text'), partial);
+            assert.match(f.controls.get('.als-task-state').textContent, /接收正文/);
+            assert.equal(f.controls.get('.als-live-text').value, partial);
+            assert.equal(f.writes.length, 0);
+            assert.equal(f.executed.length, 0);
+            assert.equal(f.context.chat.length, 30);
+            if (outcome === 'cancel') f.api.evaluate('cancelCurrentTask()');
+            else if (outcome === 'disconnect') controller.close();
+            else {
+                if (outcome === 'switch-chat') f.setContext({ ...f.context, chatId: 'another-chat', chatMetadata: {} });
+                controller.enqueue(event({ choices: [{ delta: { content: '</details>' }, finish_reason: outcome === 'length' ? 'length' : 'stop' }] }));
+                controller.enqueue(event('[DONE]'));
+                controller.close();
+            }
+            const result = await pending;
+            assert.equal(calls, 1);
+            assert.equal(f.sandbox.fetch, ownedFetch);
+            assert.equal(f.api.state().sendLockDepth, 0);
+            if (outcome === 'complete') {
+                assert.equal(result, true);
+                assert.equal(bookEntry(f).content, partial + '</details>');
+                assert.deepEqual(f.executed, ['/hide 0-9']);
+                assert.equal(f.api.evaluate('incompleteResults.size'), 0);
+            } else {
+                assert.notEqual(result, true);
+                assert.equal(f.writes.length, 0);
+                assert.equal(f.executed.length, 0);
+                assert.ok(f.context.chat.every(message => !message.is_system));
+                assert.ok(f.api.evaluate('incompleteResults.get("archive-a").content').startsWith(partial));
+                assert.doesNotMatch(f.api.evaluate('incompleteResults.get("archive-a").content'), /推理/);
+                if (outcome === 'cancel') assert.equal(cancelled, true);
+                if (outcome === 'switch-chat') assert.equal(f.controls.get('.als-incomplete-result').hidden, true);
+            }
+        });
+    }
+}
+
+test('summary streaming can be disabled and persists independently of chat streaming', async () => {
+    const f = await fixture();
+    assert.equal(f.api.state().settings.streamSummary, true);
+    f.api.evaluate('settingsDraft.streamSummary = false; scheduleChatSync = async () => {};');
+    await f.api.saveSettingsDraft();
+    assert.equal(f.savedPreferences.at(-1).auto_large_summary.streamSummary, false);
+    const loaded = await fixture(f.savedPreferences.at(-1).auto_large_summary);
+    assert.equal(loaded.api.state().settings.streamSummary, false);
+    loaded.prepareSummary({ nativeRequest: true });
+    const realFetch = loaded.sandbox.fetch;
+    let calls = 0;
+    loaded.sandbox.fetch = async (url, init) => {
+        if (!url.includes('/generate')) return realFetch(url, init);
+        calls++;
+        assert.equal(JSON.parse(init.body).stream, false);
+        return new Response(JSON.stringify({ choices: [{ message: { content: '完整总结' }, finish_reason: 'stop' }] }));
+    };
+    loaded.context.generate = async () => {
+        const payload = { type: 'quiet', messages: [{ role: 'user', content: '资料' }] };
+        loaded.api.onMainApiRequest(payload);
+        const response = await loaded.sandbox.fetch('/api/backends/chat-completions/generate', { body: JSON.stringify(payload) });
+        return (await response.json()).choices[0].message.content;
+    };
+    assert.equal(await loaded.api.runLargeSummary(), true);
+    assert.equal(calls, 1);
+});
 
 test('provider stop metadata distinguishes incomplete, filtered and completed output', async () => {
     const f = await fixture();
