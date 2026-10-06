@@ -5,7 +5,15 @@ const test = require('node:test');
 const vm = require('node:vm');
 const { webcrypto } = require('node:crypto');
 
-const source = readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8')
+function classicSource(file, seen = new Set()) {
+    if (seen.has(file)) return '';
+    seen.add(file);
+    const text = readFileSync(file, 'utf8');
+    const dependencies = [...text.matchAll(/^import .+ from ['"](.+)['"];$/gm)]
+        .map(match => classicSource(path.resolve(path.dirname(file), match[1]), seen));
+    return dependencies.join('\n') + '\n' + text.replace(/^import .+ from ['"].+['"];\r?\n/gm, '');
+}
+const source = classicSource(path.join(__dirname, '..', 'index.js'))
     .replace(/^export\s+/gm, '')
     .replace(/\bimport\.meta\.url/g, JSON.stringify('http://st.local/scripts/extensions/third-party/Mewo-Large-Summary/index.js'));
 const clone = value => structuredClone(value);
@@ -67,7 +75,7 @@ function fixture({ books = {}, active = [], characterId = '0', saveFails = false
     };
     const sandbox = vm.createContext({
         window: { SillyTavern: { getContext: () => context } },
-        structuredClone, URL, location: { pathname: '/' },
+        structuredClone, URL, AbortController, AbortSignal, location: { pathname: '/' },
         document: {
             querySelectorAll(selector) {
                 assert.equal(selector, '#world_info option');

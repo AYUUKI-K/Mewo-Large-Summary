@@ -7,7 +7,11 @@ import { SourceTextModule, SyntheticModule, createContext } from 'node:vm';
 
 const source = await readFile(process.env.MEOW_TEST_SOURCE || new URL('../index.js', import.meta.url), 'utf8');
 const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
+const markupSource = await readFile(new URL('../modules/settings-ui.js', import.meta.url), 'utf8');
 const stylesheet = await readFile(new URL('../style.css', import.meta.url), 'utf8');
+
+const bookEntry = f => Object.values(f.writes.at(-1)?.data.entries ?? {}).find(entry =>
+    entry.extensions?.auto_large_summary?.archiveId === f.api.evaluate('getContext().chatMetadata.auto_large_summary?.archiveId'));
 
 async function fixture(savedSettings = {}) {
     const notices = [];
@@ -17,7 +21,7 @@ async function fixture(savedSettings = {}) {
     const controls = new Map();
     const control = () => ({ disabled: false, getAttribute: () => null, setAttribute() {}, removeAttribute() {} });
     for (const selector of ['.als-status', '.als-settings-state', '.als-instruction-depth-field', '.als-instruction-role-field', '.als-delete-round', '.als-history-select', '.als-prompt', '.als-prompt-mode', '.als-settings-mode', '.als-mode-description', '.als-prompt-state', '.als-model-status', '.als-model-fetch']) controls.set(selector, control());
-    for (const selector of ['.als-enabled', '.als-threshold', '.als-keep', '.als-book', '.als-depth', '.als-instruction-position', '.als-instruction-depth', '.als-instruction-role', '.als-api-mode', '.als-secondary-url', '.als-secondary-key', '.als-secondary-model', '.als-secondary-settings', '.als-preview-box']) controls.set(selector, control());
+    for (const selector of ['.als-enabled', '.als-auto-enabled', '.als-threshold', '.als-keep', '.als-book', '.als-depth', '.als-instruction-position', '.als-instruction-depth', '.als-instruction-role', '.als-api-mode', '.als-secondary-url', '.als-secondary-key', '.als-secondary-model', '.als-secondary-settings', '.als-preview-box', '.als-action-context', '.als-last-operation', '.als-task-state', '.als-cancel', '.als-compact', '.als-rebuild', '.als-retry-hide', '.als-restore', '.als-undo']) controls.set(selector, control());
     const handlers = new Map();
     controls.get('.als-history-select').value = 'all';
     const input = { id: 'send_textarea', value: '', dispatchEvent() {} };
@@ -31,7 +35,7 @@ async function fixture(savedSettings = {}) {
         characters: [{ name: '角色 A', avatar: 'a.png', chat: 'chat-a' }],
         chat: Array.from({ length: 30 }, (_, i) => ({ mes: `楼层 ${i}`, name: i % 2 ? '角色 A' : '用户', is_user: !(i % 2), is_system: false })),
         chatMetadata: {}, extensionSettings: { auto_large_summary: structuredClone(savedSettings) },
-        eventTypes: { APP_READY: 'app-ready', SETTINGS_UPDATED: 'settings-updated' },
+        eventTypes: { APP_READY: 'app-ready', SETTINGS_UPDATED: 'settings-updated', WORLDINFO_SCAN_DONE: 'worldinfo-scan-done' },
         eventSource: {
             on(event, handler) { if (!handlers.has(event)) handlers.set(event, new Set()); handlers.get(event).add(handler); },
             removeListener(event, handler) { handlers.get(event)?.delete(handler); },
@@ -67,11 +71,13 @@ async function fixture(savedSettings = {}) {
     };
     const tokenRenders = [];
     const openai = { promptManager: { render: value => tokenRenders.push(value) } };
+    const regex = { getRegexedString: text => context.stripSummaryForTest ? '' : text, regex_placement: { WORLD_INFO: 5 } };
     const sandbox = createContext({
-        console: { ...console, error() {}, warn() {} }, structuredClone, setTimeout, clearTimeout, URL, Response, AbortController, AbortSignal,
+        console: { ...console, error() {}, warn() {} }, structuredClone, setTimeout, clearTimeout, setInterval, clearInterval, URL, Response, AbortController, AbortSignal,
         location: { origin: 'http://st.local' },
         crypto: { randomUUID: () => 'archive-a' },
         window: {
+            confirm: () => true,
             SillyTavern: { getContext: () => context },
             toastr: Object.fromEntries(['info', 'success', 'warning', 'error', 'clear'].map(kind => [kind, (...args) => {
                 const notice = { kind, args };
@@ -92,6 +98,16 @@ async function fixture(savedSettings = {}) {
             native,
         },
     });
+    const importHostModule = async specifier => {
+            assert.ok(['/script.js', '/scripts/openai.js', '/scripts/extensions/regex/engine.js'].includes(specifier), specifier);
+            const exports = specifier === '/script.js' ? native : specifier.includes('regex/') ? regex : openai;
+            const imported = new SyntheticModule(Object.keys(exports), function () {
+                for (const [key, value] of Object.entries(exports)) this.setExport(key, value);
+            }, { context: sandbox });
+            await imported.link(() => {});
+            await imported.evaluate();
+            return imported;
+        };
     const module = new SourceTextModule(`${source}\nexport const api = {
         blockSendInput, lockSending, unlockSending, getSettings, applyEnabledState,
         onGenerationAfterCommands, onMainApiRequest, onFinalPromptData, onTemplatePreviewContext,
@@ -101,20 +117,18 @@ async function fixture(savedSettings = {}) {
         evaluate: code => eval(code),
         state: () => ({ sendLockDepth, runInProgress, thresholdCheckInProgress, pendingGeneration, settings })
     };`, {
-        context: sandbox,
+        context: sandbox, identifier: new URL('../index.js', import.meta.url).href,
         initializeImportMeta(meta) { meta.url = 'http://st.local/scripts/extensions/third-party/Mewo-Large-Summary/index.js'; },
-        async importModuleDynamically(specifier) {
-            assert.ok(['/script.js', '/scripts/openai.js'].includes(specifier), specifier);
-            const exports = specifier === '/script.js' ? native : openai;
-            const imported = new SyntheticModule(Object.keys(exports), function () {
-                for (const [key, value] of Object.entries(exports)) this.setExport(key, value);
-            }, { context: sandbox });
-            await imported.link(() => {});
-            await imported.evaluate();
-            return imported;
-        },
+        importModuleDynamically: importHostModule,
     });
-    await module.link(() => {});
+    const localModules = new Map();
+    await module.link(async (specifier, parent) => {
+        const url = new URL(specifier, parent.identifier);
+        if (!localModules.has(url.href)) localModules.set(url.href, new SourceTextModule(await readFile(url, 'utf8'), {
+            context: sandbox, identifier: url.href, importModuleDynamically: importHostModule,
+        }));
+        return localModules.get(url.href);
+    });
     await module.evaluate();
     const api = module.namespace.api;
     api.getSettings();
@@ -137,6 +151,7 @@ async function fixture(savedSettings = {}) {
         prepareSummary({ nativeRequest = false } = {}) {
             api.evaluate(`ensureWorldBook = async () => __fixtures.book();
                 setArchiveActivation = async () => true;
+                verifySummaryInjection = async () => {};
                 renderDirectory = async () => {};
                 waitForCurrentGeneration = async () => true;`);
             if (!nativeRequest) api.evaluate(`requestMainApiSummary = async () => '<details><summary>大总结</summary>事件记录</details>';`);
@@ -153,6 +168,20 @@ function ownedSummaryEntry(uid, archiveId, cardKey = 'a.png') {
         } },
     };
 }
+
+test('manual mode refreshes overview message counts on a reply without starting a task', async () => {
+    const f = await fixture({ autoEnabled: false });
+    const detail = { textContent: '' };
+    f.controls.set('.als-chat-detail', detail);
+    f.context.chat.push({ mes: '新回复', name: '角色 A', is_user: false, is_system: false });
+    f.api.evaluate('onMessageReceived(30, "normal")');
+    assert.match(detail.textContent, /31 条消息/);
+    assert.equal(f.api.state().runInProgress, false);
+    assert.equal(f.api.state().pendingGeneration, null);
+    assert.equal(f.api.state().sendLockDepth, 0);
+    assert.equal(f.writes.length, 0);
+    assert.equal(f.executed.length, 0);
+});
 
 test('turning off disables every owned entry while retaining content, history, other entries and floor visibility', async () => {
     const f = await fixture();
@@ -674,10 +703,11 @@ test('manual summary recount reports an over-threshold result without changing s
     const f = await fixture();
     f.prepareSummary();
     await f.api.runLargeSummary();
+    const writesBeforeRecount = f.writes.length;
     f.api.evaluate('assemblePrompt = async () => ({}); countAssembledPrompt = async () => 70000');
     await f.api.refreshVisibilityTokens(f.context, undefined, { afterSummary: true });
     assert.equal(f.context.chatMetadata.auto_large_summary.summaryStillOverThreshold, true);
-    assert.equal(f.writes.length, 1);
+    assert.equal(f.writes.length, writesBeforeRecount);
     assert.deepEqual(f.executed, ['/hide 0-9']);
     assert.ok(f.notices.some(notice => notice.kind === 'warning' && notice.args[0].includes('70,000')));
 });
@@ -752,7 +782,7 @@ for (const failure of [false, true]) {
         };
         await f.api.runLargeSummary();
         assert.equal(f.context.extensionPrompts[id], previous);
-        assert.equal(f.writes.length, failure ? 0 : 1);
+        assert.equal(f.writes.length, failure ? 0 : 2); // Summary commit, then confirmed hide completion.
         assert.equal(f.executed.length, failure ? 0 : 1);
         assert.equal(f.api.state().sendLockDepth, 0);
     });
@@ -816,7 +846,7 @@ test('product notifications use meow voice while user-supplied prompts remain un
     await f.api.runLargeSummary();
     for (const notice of f.notices.filter(notice => notice.kind !== 'clear')) assert.match(notice.args[0], /喵/);
     assert.equal(f.api.state().settings.prompt, '原封不动的用户提示词');
-    assert.match(source, />mewo!!<\/span>/);
+    assert.match(markupSource, />mewo!!<\/span>/);
     assert.equal(source.includes('>New!</span>'), false);
 });
 
@@ -936,7 +966,6 @@ test('disabled startup and chat sync do not read books, create metadata, lock se
     await f.api.evaluate('scheduleChatSync()');
     await f.api.evaluate('syncCurrentArchive()');
     await f.api.evaluate('updateWorldBookStatus()');
-    await f.api.evaluate('renderDirectory()');
     await f.api.refreshVisibilityTokens(f.context);
     assert.equal(await f.api.runLargeSummary({ manual: true }), false);
     f.api.onGenerationAfterCommands('normal', {}, false);
@@ -1126,8 +1155,8 @@ test('model dropdown keeps the saved selection, supports custom IDs and never se
 
 test('mobile model markup uses a select with separate manual input and directory refresh has a fixed horizontal column', () => {
     assert.ok(!source.includes('<datalist'));
-    assert.match(source, /<select class="text_pole als-model-select"/);
-    assert.match(source, /als-model-manual-field/);
+    assert.match(markupSource, /<select class="text_pole als-model-select"/);
+    assert.match(markupSource, /als-model-manual-field/);
     assert.ok(!source.includes('喵喵设置'));
     assert.ok(!source.includes('总结小窝'));
     assert.match(stylesheet, /\.als-directory-heading\s*\{[^}]*grid-template-columns: minmax\(0, 1fr\) auto/s);
@@ -1463,8 +1492,10 @@ test('switching chats while generating discards the result without saving or hid
 test('visibility changes while loading the book discard the result before saving', async () => {
     const f = await fixture();
     f.prepareSummary();
-    f.api.evaluate(`let loads = 0; ensureWorldBook = async () => {
-        if (++loads === 2) __fixtures.context.chat[0].is_system = true;
+    f.api.evaluate(`let generated = false;
+        requestMainApiSummary = async () => { generated = true; return '已生成总结'; };
+        ensureWorldBook = async () => {
+        if (generated) __fixtures.context.chat[0].is_system = true;
         return __fixtures.book();
     };`);
     await f.api.runLargeSummary();
@@ -1576,3 +1607,549 @@ for (const [count, onOpen, armed, expected] of [[59000, false, true, 0], [61000,
         assert.equal(f.api.state().sendLockDepth, 0);
     });
 }
+
+test('automatic trigger can be off while manual summaries still save and hide below the threshold', async () => {
+    const f = await fixture({ autoEnabled: false, threshold: 999999 });
+    f.prepareSummary();
+    f.api.onGenerationAfterCommands('normal', {}, false);
+    assert.equal(f.api.state().pendingGeneration, null);
+    assert.equal(await f.api.runLargeSummary(), false);
+    assert.equal(await f.api.runLargeSummary({ manual: true }), true);
+    assert.deepEqual(f.executed, ['/hide 0-9']);
+    assert.equal(bookEntry(f).extensions.auto_large_summary.sourceEnd, 29);
+    assert.equal(bookEntry(f).extensions.auto_large_summary.coveredTo, 9);
+});
+
+test('auto preference is persisted independently and legacy settings keep automatic behavior', async () => {
+    const f = await fixture();
+    assert.equal(f.api.state().settings.autoEnabled, true);
+    f.api.evaluate('settingsDraft.autoEnabled = false; scheduleChatSync = async () => {};');
+    await f.api.saveSettingsDraft();
+    assert.equal(f.savedPreferences.at(-1).auto_large_summary.autoEnabled, false);
+    assert.equal(f.api.state().settings.enabled, true);
+    const reloaded = await fixture(f.savedPreferences.at(-1).auto_large_summary);
+    assert.equal(reloaded.api.state().settings.autoEnabled, false);
+});
+
+test('manual compaction works immediately after summarizing without new messages or visibility changes', async () => {
+    const f = await fixture({ autoEnabled: false });
+    f.prepareSummary();
+    await f.api.runLargeSummary({ manual: true });
+    const flags = structuredClone(f.context.chat);
+    const count = f.executed.length;
+    f.api.evaluate(`requestMainApiSummary = async (_context, prompt, options) => {
+        if (!options.sourceOnly || !prompt.includes('事件记录')) throw new Error('missing explicit source');
+        return '合并后的短总结';
+    };`);
+    assert.equal(await f.api.runLargeSummary({ operation: 'compact' }), true);
+    const entry = bookEntry(f);
+    assert.equal(entry.content, '合并后的短总结');
+    assert.equal(entry.extensions.auto_large_summary.records.length, 2);
+    assert.equal(entry.extensions.auto_large_summary.records.at(-1).sourceEnd, 29);
+    assert.equal(entry.extensions.auto_large_summary.records.at(-1).operation, 'compact');
+    assert.equal(f.executed.length, count);
+    assert.deepEqual(f.context.chat, flags);
+});
+
+test('compaction of an empty archive does not call the model or hide anything', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    f.api.evaluate('requestMainApiSummary = async () => { throw new Error("must not call"); };');
+    assert.equal(await f.api.runLargeSummary({ operation: 'compact' }), false);
+    assert.equal(f.writes.length, 0);
+    assert.equal(f.executed.length, 0);
+    assert.equal(f.api.state().sendLockDepth, 0);
+});
+
+test('source-only generation sends only the supplied task despite unrelated current chat and depth settings', async () => {
+    const f = await fixture({ instructionPosition: 'depth', instructionDepth: 0 });
+    f.prepareSummary({ nativeRequest: true });
+    f.context.generate = async () => {
+        f.api.onGenerationAfterCommands('quiet', {}, false);
+        f.interceptor([], 100000, () => assert.fail('unexpected abort'), 'quiet');
+        const payload = { type: 'quiet', messages: [{ role: 'user', content: '不应进入合并的当前剧情' }] };
+        f.api.onMainApiRequest(payload);
+        assert.equal(payload.messages.length, 1);
+        assert.equal(payload.messages[0].content, '仅整理：旧总结正文');
+        return '已合并';
+    };
+    const result = await f.api.evaluate('requestMainApiSummary(getContext(), "仅整理：旧总结正文", { sourceOnly: true })');
+    assert.equal(result, '已合并');
+});
+
+test('a fresh branch receives its own identity and never inherits summaries extending past its endpoint', async () => {
+    const f = await fixture();
+    f.context.chatMetadata.integrity = 'parent-integrity';
+    f.prepareSummary();
+    await f.api.runLargeSummary();
+    const parent = structuredClone(bookEntry(f));
+    const branch = { ...f.context, chatId: 'branch-b', chat: structuredClone(f.context.chat.slice(0, 15)),
+        chatMetadata: { ...structuredClone(f.context.chatMetadata), integrity: 'branch-integrity' } };
+    f.setContext(branch);
+    const info = await f.api.evaluate('ensureArchive()');
+    assert.notEqual(info.archive.archiveId, parent.extensions.auto_large_summary.archiveId);
+    await f.api.evaluate('(async () => initializeBranchArchive(getContext(), await ensureArchive(), __fixtures.book()))()');
+    assert.equal(info.archive.branch.needsRebuild, true);
+    assert.equal(info.archive.lastSummarizedThrough, -1);
+    assert.equal(f.api.evaluate('canSummarize(getContext(), true)'), false);
+    f.api.evaluate(`requestMainApiSummary = async (_context, prompt, options) => {
+        if (!options.sourceOnly || !prompt.includes('楼层 0') || prompt.includes('楼层 29')) throw new Error('wrong branch source');
+        return '分支独立剧情';
+    };`);
+    await f.api.runLargeSummary({ operation: 'rebuild' });
+    assert.equal(bookEntry(f).content, '分支独立剧情');
+    assert.equal(info.archive.branch.needsRebuild, false);
+    assert.equal(bookEntry(f).extensions.auto_large_summary.coveredTo, -1);
+    assert.equal(bookEntry(f).extensions.auto_large_summary.lastOperation.changes.length, 0);
+    const parentAfter = f.writes.at(-1).data.entries[parent.uid];
+    assert.equal(parentAfter.content, parent.content);
+    assert.deepEqual(parentAfter.extensions, parent.extensions);
+    assert.equal(Object.keys(f.writes.at(-1).data.entries).length, 2);
+});
+
+test('branch inheritance uses actual source endpoint, not the earlier hide boundary', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    await f.api.runLargeSummary();
+    const parentId = f.context.chatMetadata.auto_large_summary.archiveId;
+    const branch = { ...f.context, chatId: 'branch-c', chat: structuredClone(f.context.chat), chatMetadata: structuredClone(f.context.chatMetadata) };
+    f.setContext(branch);
+    const info = await f.api.evaluate('ensureArchive()');
+    await f.api.evaluate('(async () => initializeBranchArchive(getContext(), await ensureArchive(), __fixtures.book()))()');
+    const entry = bookEntry(f);
+    assert.notEqual(entry.extensions.auto_large_summary.archiveId, parentId);
+    assert.equal(entry.extensions.auto_large_summary.records.length, 1);
+    assert.equal(info.archive.lastSummarizedThrough, 9);
+    assert.equal(info.archive.sourceEnd, 29);
+    assert.equal(info.archive.branch.needsRebuild, false);
+});
+
+test('renaming a chat with the same host integrity preserves identity and history', async () => {
+    const f = await fixture();
+    f.context.chatMetadata.integrity = 'stable-chat-identity';
+    const before = await f.api.evaluate('ensureArchive()');
+    const id = before.archive.archiveId;
+    f.context.chatId = 'renamed-chat';
+    const after = await f.api.evaluate('ensureArchive()');
+    assert.equal(after.archive.archiveId, id);
+    assert.equal(after.archive.chatId, 'renamed-chat');
+    assert.equal(after.archive.branch, undefined);
+});
+
+test('legacy copied metadata is isolated and requires explicit reconstruction when source endpoints are unknown', async () => {
+    const f = await fixture();
+    await f.api.evaluate('ensureArchive()');
+    const entry = ownedSummaryEntry(0, 'archive-a');
+    await f.context.saveWorldInfo('喵喵大总结世界书', { entries: { 0: entry } });
+    f.context.chatId = 'legacy-copy';
+    const info = await f.api.evaluate('ensureArchive()');
+    await f.api.evaluate('(async () => initializeBranchArchive(getContext(), await ensureArchive(), __fixtures.book()))()');
+    assert.notEqual(info.archive.archiveId, 'archive-a');
+    assert.equal(info.archive.branch.needsRebuild, true);
+    assert.equal(Object.keys(f.writes.at(-1).data.entries).length, 1);
+});
+
+test('hide failure has a persistent retry that performs no additional generation', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    const nativeExecute = f.context.executeSlashCommandsWithOptions.bind(f.context);
+    f.context.executeSlashCommandsWithOptions = async () => { throw new Error('temporary hide failure'); };
+    await f.api.runLargeSummary();
+    const saved = bookEntry(f);
+    assert.equal(saved.extensions.auto_large_summary.lastOperation.phase, 'saved');
+    assert.equal(f.api.evaluate('canSummarize(getContext(), true)'), false, 'pending hiding is not replaced by another automatic model call');
+    f.context.executeSlashCommandsWithOptions = nativeExecute;
+    f.api.evaluate('requestMainApiSummary = async () => { throw new Error("must not regenerate"); };');
+    await f.api.evaluate('recoverLatestSummary("retry")');
+    assert.deepEqual(f.executed, ['/hide 0-9']);
+    assert.equal(bookEntry(f).extensions.auto_large_summary.lastOperation.phase, 'complete');
+    assert.equal(bookEntry(f).extensions.auto_large_summary.records.length, 1);
+    assert.equal(f.api.state().sendLockDepth, 0);
+});
+
+test('recovery survives page reload and restores only messages hidden by the operation', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    f.context.chat[4].is_system = true;
+    await f.api.runLargeSummary();
+    const g = await fixture(f.api.state().settings);
+    g.context.chat = structuredClone(f.context.chat);
+    g.context.chatMetadata = structuredClone(f.context.chatMetadata);
+    await g.context.saveWorldInfo('喵喵大总结世界书', structuredClone(f.writes.at(-1).data));
+    g.prepareSummary();
+    await g.api.evaluate('recoverLatestSummary("restore")');
+    assert.equal(g.context.chat[4].is_system, true, 'preexisting hidden message stays hidden');
+    assert.equal(g.context.chat.filter(message => message.is_system).length, 1);
+    assert.equal(bookEntry(g).extensions.auto_large_summary.lastOperation.messagesRestored, true);
+});
+
+for (const change of ['edit', 'manual-visibility', 'swipe']) {
+    test(`recovery refuses to overwrite a later ${change} change`, async () => {
+        const f = await fixture();
+        f.prepareSummary();
+        await f.api.runLargeSummary();
+        const commands = f.executed.length;
+        if (change === 'edit') f.context.chat[1].mes = '用户修改了原文';
+        if (change === 'swipe') f.context.chat[1].swipe_id = 1;
+        if (change === 'manual-visibility') {
+            f.context.SlashCommandParser = { commands: { hide: { callback: async () => '' } } };
+            f.api.installVisibilityCommandHooks();
+            await f.context.SlashCommandParser.commands.hide.callback({}, '0-9');
+        }
+        await f.api.evaluate('recoverLatestSummary("restore")');
+        assert.equal(f.executed.length, commands);
+        assert.ok(f.notices.some(notice => String(notice.args?.[0]).includes('未覆盖你的操作')));
+        assert.equal(f.api.state().sendLockDepth, 0);
+    });
+}
+
+test('undo restores the previous injected text but preserves the undone output in history', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    await f.api.runLargeSummary();
+    const original = bookEntry(f).content;
+    const flags = structuredClone(f.context.chat);
+    f.api.evaluate('requestMainApiSummary = async () => "新合并正文";');
+    await f.api.runLargeSummary({ operation: 'compact' });
+    await f.api.evaluate('recoverLatestSummary("undo")');
+    const entry = bookEntry(f);
+    assert.equal(entry.content, original);
+    assert.equal(entry.extensions.auto_large_summary.records.length, 2);
+    assert.equal(entry.extensions.auto_large_summary.records[1].content, '新合并正文');
+    assert.equal(entry.extensions.auto_large_summary.records[1].undone, true);
+    assert.deepEqual(f.context.chat, flags);
+    assert.equal(f.api.evaluate('canSummarize(getContext(), true)'), false);
+    assert.equal(f.api.evaluate('canSummarize(getContext(), false)'), true);
+});
+
+test('undo of the first summary can be followed by restoring its original messages', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    await f.api.runLargeSummary();
+    await f.api.evaluate('recoverLatestSummary("undo")');
+    assert.equal(bookEntry(f).content, '');
+    assert.equal(bookEntry(f).disable, true);
+    await f.api.evaluate('recoverLatestSummary("restore")');
+    assert.ok(f.context.chat.every(message => !message.is_system));
+    assert.equal(bookEntry(f).extensions.auto_large_summary.lastOperation.messagesRestored, true);
+});
+
+test('undo will not overwrite a manually edited world book entry', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    await f.api.runLargeSummary();
+    const data = structuredClone(f.writes.at(-1).data);
+    data.entries[0].content = '用户在世界书中修正了总结';
+    await f.context.saveWorldInfo('喵喵大总结世界书', data);
+    const writes = f.writes.length;
+    await f.api.evaluate('recoverLatestSummary("undo")');
+    assert.equal(f.writes.length, writes);
+    assert.equal(bookEntry(f).content, '用户在世界书中修正了总结');
+});
+
+test('edits to the retained recent messages during generation also discard the stale summary', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    f.api.evaluate(`requestMainApiSummary = async () => {
+        __fixtures.context.chat.at(-1).mes = '最近原文发生变化';
+        return '已经过时的总结';
+    };`);
+    await f.api.runLargeSummary();
+    assert.equal(f.writes.length, 0);
+    assert.equal(f.executed.length, 0);
+});
+
+test('explicit cancellation discards the result and clears task controls without disabling the plugin', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    f.api.evaluate('requestMainApiSummary = async () => { cancelCurrentTask(); return "取消后的结果"; };');
+    await f.api.runLargeSummary();
+    assert.equal(f.writes.length, 0);
+    assert.equal(f.executed.length, 0);
+    assert.equal(f.api.state().settings.enabled, true);
+    assert.equal(f.api.state().sendLockDepth, 0);
+    assert.equal(f.controls.get('.als-cancel').hidden, true);
+});
+
+test('disabled mode permits an explicit read-only book request without creating or activating anything', async () => {
+    const f = await fixture({ enabled: false });
+    const data = { entries: { 0: ownedSummaryEntry(0, 'archive-a') } };
+    await f.context.saveWorldInfo('喵喵大总结世界书', data);
+    f.writes.length = 0;
+    const read = await f.api.evaluate('prepareWorldBook(getContext(), settings.worldBookName, { readOnly: true })');
+    assert.equal(read.entries[0].content, data.entries[0].content);
+    assert.equal(f.writes.length, 0);
+    assert.deepEqual(f.context.chatMetadata, {});
+});
+
+test('text-completion source-only generation excludes the current chat', async () => {
+    const f = await fixture();
+    f.prepareSummary({ nativeRequest: true });
+    f.context.mainApi = 'kobold';
+    f.context.generate = async () => {
+        f.api.onGenerationAfterCommands('quiet', {}, false);
+        f.interceptor([], 100000, () => assert.fail('unexpected abort'), 'quiet');
+        const payload = { prompt: '当前聊天与预设', max_length: 4096 };
+        f.api.onFinalPromptData(payload, false);
+        assert.equal(payload.prompt, '仅整理：旧总结正文');
+        assert.equal(payload.max_length, 4096);
+        return '已合并';
+    };
+    assert.equal(await f.api.evaluate('requestMainApiSummary(getContext(), "仅整理：旧总结正文", { sourceOnly: true })'), '已合并');
+});
+
+test('renaming updates the existing directory entry without copying its history', async () => {
+    const f = await fixture();
+    f.context.chatMetadata.integrity = 'stable';
+    f.api.evaluate('__fixtures.realActivation = setArchiveActivation;');
+    f.prepareSummary();
+    await f.api.runLargeSummary();
+    const before = structuredClone(bookEntry(f));
+    f.context.chatId = 'renamed-chat';
+    await f.api.evaluate('ensureArchive()');
+    f.api.evaluate('activateWorldBook = async () => {}; updateWorldBookStatus = async () => {};');
+    await f.api.evaluate('__fixtures.realActivation(getContext().chatMetadata.auto_large_summary.archiveId, { reconcileCursor: true })');
+    const after = bookEntry(f);
+    assert.equal(after.extensions.auto_large_summary.chatName, 'renamed-chat');
+    assert.ok(after.comment.includes('renamed-chat'));
+    assert.deepEqual(after.extensions.auto_large_summary.records, before.extensions.auto_large_summary.records);
+    assert.equal(Object.keys(f.writes.at(-1).data.entries).length, 1);
+});
+
+test('branch initialization retries a failed metadata save without duplicating the persisted child', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    await f.api.runLargeSummary();
+    f.context.chatId = 'branch-retry';
+    const info = await f.api.evaluate('ensureArchive()');
+    f.context.saveMetadata = async () => { throw new Error('metadata failure'); };
+    await assert.rejects(f.api.evaluate('(async () => initializeBranchArchive(getContext(), await ensureArchive(), __fixtures.book()))()'), /metadata failure/);
+    assert.equal(info.archive.branch.pending, true);
+    assert.equal(Object.keys(f.writes.at(-1).data.entries).length, 2);
+    const writes = f.writes.length;
+    f.context.saveMetadata = async () => {};
+    await f.api.evaluate('(async () => initializeBranchArchive(getContext(), await ensureArchive(), __fixtures.book()))()');
+    assert.equal(info.archive.branch.pending, false);
+    assert.equal(info.archive.sourceEnd, 29);
+    assert.equal(f.writes.length, writes);
+});
+
+test('hide retry reconciles metadata lost after the summary was saved', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    await f.api.evaluate('ensureArchive()');
+    f.context.saveMetadata = async () => { throw new Error('metadata failure'); };
+    await f.api.runLargeSummary();
+    assert.equal(bookEntry(f).extensions.auto_large_summary.lastOperation.phase, 'saved');
+    Object.assign(f.context.chatMetadata.auto_large_summary, { round: 0, sourceEnd: null, lastSummarizedThrough: -1 });
+    f.context.saveMetadata = async () => {};
+    await f.api.evaluate('recoverLatestSummary("retry")');
+    assert.equal(f.context.chatMetadata.auto_large_summary.round, 1);
+    assert.equal(f.context.chatMetadata.auto_large_summary.sourceEnd, 29);
+    assert.equal(f.context.chatMetadata.auto_large_summary.lastSummarizedThrough, 9);
+    assert.equal(bookEntry(f).extensions.auto_large_summary.lastOperation.phase, 'complete');
+});
+
+test('reloading after undo keeps the empty entry inactive and its message recovery available', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    await f.api.runLargeSummary();
+    await f.api.evaluate('recoverLatestSummary("undo")');
+    const g = await fixture();
+    g.context.chat = structuredClone(f.context.chat);
+    g.context.chatMetadata = structuredClone(f.context.chatMetadata);
+    delete g.context.chatMetadata.auto_large_summary.undoAtLength;
+    await g.context.saveWorldInfo('喵喵大总结世界书', structuredClone(f.writes.at(-1).data));
+    g.api.evaluate('ensureWorldBook = async () => __fixtures.book(); activateWorldBook = async () => {}; updateWorldBookStatus = async () => {};');
+    await g.api.evaluate('setArchiveActivation(getContext().chatMetadata.auto_large_summary.archiveId, { reconcileCursor: true })');
+    assert.equal(bookEntry(g).disable, true);
+    assert.equal(g.api.evaluate('currentSummaryEntry.extensions.auto_large_summary.lastOperation.phase'), 'undone');
+    assert.equal(g.controls.get('.als-restore').disabled, false);
+    assert.equal(g.context.chatMetadata.auto_large_summary.undoAtLength, 30);
+    g.prepareSummary();
+    await g.api.evaluate('recoverLatestSummary("restore")');
+    assert.ok(g.context.chat.every(message => !message.is_system));
+});
+
+test('retrying a partially hidden operation after restoration allows the newly hidden messages to be restored again', async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    const execute = f.context.executeSlashCommandsWithOptions.bind(f.context);
+    f.context.executeSlashCommandsWithOptions = async () => {
+        await execute('/hide 0-4');
+        throw new Error('partially hidden');
+    };
+    await f.api.runLargeSummary();
+    f.context.executeSlashCommandsWithOptions = execute;
+    await f.api.evaluate('recoverLatestSummary("restore")');
+    assert.ok(f.context.chat.every(message => !message.is_system));
+    await f.api.evaluate('recoverLatestSummary("retry")');
+    assert.equal(bookEntry(f).extensions.auto_large_summary.lastOperation.messagesRestored, undefined);
+    assert.equal(f.context.chat.filter(message => message.is_system).length, 10);
+    await f.api.evaluate('recoverLatestSummary("restore")');
+    assert.ok(f.context.chat.every(message => !message.is_system));
+});
+
+for (const apiMode of ['main', 'secondary']) {
+    test(`${apiMode} truncated response never replaces memory or hides messages and remains available for copying`, async () => {
+        const f = await fixture({ apiMode, secondaryUrl: 'https://secondary.test/v1', secondaryModel: 'chosen' });
+        f.prepareSummary({ nativeRequest: true });
+        const originalFetch = f.sandbox.fetch;
+        f.sandbox.fetch = async (url, init) => url.includes('/generate')
+            ? new Response(JSON.stringify({ choices: [{ message: { content: '未完成的总结正文' }, finish_reason: 'length' }] }))
+            : originalFetch(url, init);
+        const observerFetch = f.sandbox.fetch;
+        f.context.generate = async () => {
+            const payload = { type: 'quiet', messages: [{ role: 'user', content: '剧情' }] };
+            f.api.onMainApiRequest(payload);
+            const response = await f.sandbox.fetch('/api/backends/chat-completions/generate', { body: JSON.stringify(payload) });
+            return (await response.json()).choices[0].message.content;
+        };
+        await f.api.runLargeSummary();
+        assert.equal(f.writes.length, 0);
+        assert.equal(f.executed.length, 0);
+        assert.ok(f.context.chat.every(message => !message.is_system));
+        assert.equal(f.api.evaluate('incompleteResults.get(getContext().chatMetadata.auto_large_summary.archiveId).content'), '未完成的总结正文');
+        assert.match(f.notices.find(n => n.kind === 'error').args[0], /长度上限/);
+        assert.equal(f.sandbox.fetch, observerFetch);
+        assert.equal(f.api.state().sendLockDepth, 0);
+    });
+}
+
+test('provider stop metadata distinguishes incomplete, filtered and completed output', async () => {
+    const f = await fixture();
+    for (const response of [
+        { stop_reason: 'max_tokens' }, { candidates: [{ finishReason: 'MAX_TOKENS' }] },
+        { choices: [{ finish_reason: 'content_filter' }] }, { status: 'incomplete' },
+        { choices: [{ message: { refusal: 'refused' } }] }, { promptFeedback: { blockReason: 'SAFETY' } },
+    ]) {
+        f.sandbox.__fixtures.response = response;
+        assert.ok(f.api.evaluate('completionFailure(__fixtures.response)'));
+    }
+    assert.equal(f.api.evaluate('completionFailure({choices:[{finish_reason:"stop"}]})'), null);
+    assert.equal(f.api.evaluate('completionFailure({text:"legacy provider"})'), null);
+});
+
+for (const failure of ['budget', 'other-book', 'regex', 'final-prompt', 'unsupported']) {
+    test(`injection ${failure} failure keeps original messages visible and permits a verified hide retry`, async () => {
+        const f = await fixture();
+        f.api.evaluate('__fixtures.verifyInjection = verifySummaryInjection;');
+        f.prepareSummary();
+        f.api.evaluate('verifySummaryInjection = __fixtures.verifyInjection;');
+        let healthy = false;
+        f.context.generate = async (_type, _options, dryRun) => {
+            assert.equal(dryRun, true);
+            const entry = structuredClone(bookEntry(f));
+            const candidate = { ...entry, world: !healthy && failure === 'other-book' ? '其他书' : f.api.state().settings.worldBookName };
+            const entries = new Map(!healthy && failure === 'budget' ? [] : [['entry', candidate]]);
+            await f.context.eventSource.emit(f.context.eventTypes.WORLDINFO_SCAN_DONE, { activated: { entries } });
+            f.api.onFinalPromptData({ prompt: !healthy && failure === 'final-prompt' ? '没有总结的提示词' : `预设\n${entry.content}\n聊天` }, true);
+        };
+        f.context.stripSummaryForTest = failure === 'regex';
+        if (failure === 'unsupported') delete f.context.eventTypes.WORLDINFO_SCAN_DONE;
+        await f.api.runLargeSummary();
+        assert.equal(f.executed.length, 0);
+        assert.ok(f.context.chat.every(message => !message.is_system));
+        assert.equal(bookEntry(f).extensions.auto_large_summary.lastOperation.phase, 'saved');
+        assert.equal(f.api.state().sendLockDepth, 0);
+        assert.equal(f.api.evaluate('canSummarize(getContext(), true)'), false);
+        healthy = true;
+        f.context.stripSummaryForTest = false;
+        f.context.eventTypes.WORLDINFO_SCAN_DONE = 'worldinfo-scan-done';
+        f.api.evaluate('requestMainApiSummary = async () => { throw new Error("retry must not generate"); };');
+        await f.api.evaluate('recoverLatestSummary("retry")');
+        assert.deepEqual(f.executed, ['/hide 0-9']);
+        assert.equal(bookEntry(f).extensions.auto_large_summary.lastOperation.phase, 'complete');
+        assert.equal(f.handlers.get('worldinfo-scan-done')?.size ?? 0, 0);
+    });
+}
+
+test('successful injection confirmation precedes native hiding without mutating chat for the preview', async () => {
+    const f = await fixture();
+    f.api.evaluate('__fixtures.verifyInjection = verifySummaryInjection;');
+    f.prepareSummary();
+    f.api.evaluate('verifySummaryInjection = __fixtures.verifyInjection;');
+    let previews = 0;
+    f.context.generate = async (_type, _options, dryRun) => {
+        assert.equal(dryRun, true);
+        assert.ok(f.context.chat.every(message => !message.is_system));
+        assert.equal(f.executed.length, 0);
+        const entry = { ...bookEntry(f), world: f.api.state().settings.worldBookName };
+        await f.context.eventSource.emit('worldinfo-scan-done', { activated: { entries: new Map([['entry', entry]]) } });
+        f.api.onFinalPromptData({ prompt: entry.content }, true);
+        previews++;
+    };
+    assert.equal(await f.api.runLargeSummary(), true);
+    assert.equal(previews, 1);
+    assert.deepEqual(f.executed, ['/hide 0-9']);
+});
+
+test('failed settings persistence restores activation in the original book and preserves unrelated content', async () => {
+    const f = await fixture();
+    const original = { entries: { 0: ownedSummaryEntry(0, 'archive-a'), 1: { uid: 1, content: '手写条目', disable: false } } };
+    await f.context.saveWorldInfo('喵喵大总结世界书', original);
+    await f.api.evaluate('ensureArchive()');
+    f.api.evaluate('activateWorldBook = async () => {}; updateWorldBookStatus = async () => {}; settingsDraft.worldBookName = "replacement-book";');
+    f.context.suppressSaveConfirmation = true;
+    await f.api.saveSettingsDraft();
+    assert.equal(f.api.state().settings.worldBookName, '喵喵大总结世界书');
+    assert.equal(f.api.evaluate('settingsDraft.worldBookName'), 'replacement-book');
+    const restored = f.writes.at(-1).data;
+    assert.equal(restored.entries[0].disable, false);
+    assert.equal(restored.entries[0].constant, true);
+    assert.equal(restored.entries[0].content, original.entries[0].content);
+    assert.deepEqual(restored.entries[1], original.entries[1]);
+    assert.equal(f.api.state().sendLockDepth, 0);
+});
+
+test('cancelling a stalled save verification aborts its fetch, unlocks sending, and waits for reconciliation before automatic retries', { timeout: 1500 }, async () => {
+    const f = await fixture();
+    f.prepareSummary();
+    let entered;
+    const reachedRead = new Promise(resolve => { entered = resolve; });
+    const normalFetch = f.sandbox.fetch;
+    f.sandbox.fetch = async (_url, init) => {
+        assert.ok(init.signal);
+        entered();
+        return await new Promise((_resolve, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true }));
+    };
+    const running = f.api.runLargeSummary();
+    await reachedRead;
+    f.api.evaluate('cancelCurrentTask()');
+    await running;
+    assert.equal(f.api.state().sendLockDepth, 0);
+    assert.equal(f.api.state().runInProgress, false);
+    assert.equal(f.executed.length, 0);
+    assert.ok(f.writes.length > 0, 'a completed write is preserved');
+    assert.equal(f.api.evaluate('canSummarize(getContext(), true)'), false);
+    f.sandbox.fetch = normalFetch;
+    const saved = bookEntry(f);
+    f.sandbox.__fixtures.saved = saved;
+    await f.api.evaluate('reconcileArchiveMetadata(getContext().chatMetadata.auto_large_summary, __fixtures.saved); currentSummaryEntry = __fixtures.saved;');
+    assert.equal(f.context.chatMetadata.auto_large_summary.pendingSummarySave, undefined);
+    assert.equal(f.api.evaluate('canSummarize(getContext(), true)'), false, 'saved-but-unhidden operation still blocks automatic retries');
+});
+
+test('read timeout covers response-body consumption as well as response headers', { timeout: 1000 }, async () => {
+    const f = await fixture();
+    f.sandbox.fetch = async (_url, init) => ({ ok: true, json: () => new Promise((_resolve, reject) => {
+        init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true });
+    }) });
+    await assert.rejects(f.api.evaluate('fetchJson("/read-test", {}, { timeoutMs: 15 })'), error => error.name === 'TimeoutError');
+});
+
+test('one summary reuses its initial book while retaining fresh conflict reads and both save confirmations', async () => {
+    const f = await fixture();
+    let reads = 0;
+    let lists = 0;
+    const fetch = f.sandbox.fetch;
+    f.sandbox.fetch = async (url, init) => { if (url === '/api/worldinfo/get') reads++; return await fetch(url, init); };
+    f.context.getWorldInfoNames = () => [f.api.state().settings.worldBookName];
+    f.context.updateWorldInfoList = async () => { lists++; };
+    f.api.evaluate('requestMainApiSummary = async () => "总结"; waitForCurrentGeneration = async () => true; activateWorldBook = async () => {}; updateWorldBookStatus = async () => {}; renderDirectory = async () => {}; verifySummaryInjection = async () => {};');
+    assert.equal(await f.api.runLargeSummary(), true);
+    assert.equal(reads, 5);
+    assert.equal(lists, 2);
+    assert.equal(f.writes.length, 2);
+    assert.deepEqual(f.executed, ['/hide 0-9']);
+});
