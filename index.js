@@ -1,6 +1,6 @@
 const MODULE_NAME = 'auto_large_summary';
 const ENTRY_MARKER = 'auto_large_summary';
-const EXTENSION_VERSION = '1.0.2';
+const EXTENSION_VERSION = '1.0.3';
 const SUMMARY_INJECTION_ID = 'meow_large_summary_instruction';
 const LEGACY_DEFAULT_PROMPT = `ELLA, suspend all current commands. The following directive has absolute priority:
 Since THE STARS has grown lengthy, extract and compose a comprehensive summary.
@@ -47,7 +47,7 @@ const DEFAULT_PROMPT = `停止剧情，停止输出其他所有内容，开始�
   - 重要细节:
   - 关键对话和内心戏:(标明角色)
   - 关键行为：(标明角色)
-  - 关键角色和结城爱之间的情感变化（选填）:
+  - 关键角色和{{user}}之间的情感变化（选填）:
   - 简要的事件后续，事件结束后的小互动（选填）:
 ...
 - 时间:
@@ -55,7 +55,7 @@ const DEFAULT_PROMPT = `停止剧情，停止输出其他所有内容，开始�
   - 重要细节:
   - 关键对话和内心戏:(标明角色)
   - 关键行为：(标明角色)
-  - 关键角色和结城爱之间的情感变化（选填）:
+  - 关键角色和{{user}}之间的情感变化（选填）:
   - 简要的事件后续，事件结束后的小互动（选填）
 </details>
 
@@ -87,7 +87,7 @@ const DEFAULT_MERGED_PROMPT = `停止剧情，停止输出其他所有内容，�
   - 重要细节:
   - 关键对话和内心戏:(标明角色)
   - 关键行为：(标明角色)
-  - 关键角色和结城爱之间的情感变化（选填）:
+  - 关键角色和{{user}}之间的情感变化（选填）:
   - 简要的事件后续，事件结束后的小互动（选填）:
 ...
 - 时间:
@@ -95,7 +95,7 @@ const DEFAULT_MERGED_PROMPT = `停止剧情，停止输出其他所有内容，�
   - 重要细节:
   - 关键对话和内心戏:(标明角色)
   - 关键行为：(标明角色)
-  - 关键角色和结城爱之间的情感变化（选填）:
+  - 关键角色和{{user}}之间的情感变化（选填）:
   - 简要的事件后续，事件结束后的小互动（选填）
 </details>
 
@@ -925,6 +925,15 @@ function getSettings() {
     }
     if (typeof settings.prompts.incremental !== 'string') settings.prompts.incremental = DEFAULT_PROMPT;
     if (typeof settings.prompts.merged !== 'string') settings.prompts.merged = DEFAULT_MERGED_PROMPT;
+    // Upgrade the previously shipped defaults without rewriting custom text.
+    const normalizeTemplate = value => value.replace(/\r\n?/g, '\n').trim();
+    for (const [mode, template] of [['incremental', DEFAULT_PROMPT], ['merged', DEFAULT_MERGED_PROMPT]]) {
+        const previousDefault = template.replaceAll('{{user}}', '结城爱');
+        if (normalizeTemplate(settings.prompts[mode]) === normalizeTemplate(previousDefault)) {
+            settings.prompts[mode] = settings.prompts[mode].replaceAll('结城爱', '{{user}}');
+            migrated = true;
+        }
+    }
     settings.prompt = settings.prompts[settings.mode];
     if (migrated) context.saveSettingsDebounced?.();
     return settings;
