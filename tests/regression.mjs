@@ -371,6 +371,71 @@ test('upgrading legacy settings preserves custom prompts and repairs missing tem
     assert.match(defaults.api.state().settings.prompts.merged, /严禁输出<moew_FM>摘要/);
 });
 
+test('both default templates use the native user macro instead of a fixed persona name', async () => {
+    const f = await fixture();
+    for (const template of Object.values(f.api.state().settings.prompts)) {
+        assert.equal((template.match(/关键角色和\{\{user\}\}之间的情感变化/g) ?? []).length, 2);
+        assert.ok(!template.includes('结城爱'));
+        assert.ok(!template.includes('<user>'));
+    }
+});
+
+test('previously saved named defaults migrate once, preserve whitespace, and survive persistence and reload', async () => {
+    const f = await fixture();
+    const defaults = structuredClone(f.api.state().settings.prompts);
+    const old = Object.fromEntries(Object.entries(defaults).map(([mode, template]) => [mode, ` \r\n${template.replaceAll('{{user}}', '结城爱').replaceAll('\n', '\r\n')}\r\n `]));
+    const expected = Object.fromEntries(Object.entries(old).map(([mode, template]) => [mode, template.replaceAll('结城爱', '{{user}}')]));
+    f.api.state().settings.prompts = old;
+    f.api.state().settings.mode = 'merged';
+    let saves = 0;
+    f.context.saveSettingsDebounced = () => { saves++; };
+    f.api.getSettings();
+    assert.equal(saves, 1);
+    for (const mode of ['incremental', 'merged']) assert.equal(f.api.state().settings.prompts[mode], expected[mode]);
+    assert.equal(f.api.state().settings.prompt, f.api.state().settings.prompts.merged);
+    f.api.getSettings();
+    assert.equal(saves, 1, 'migrated defaults must not be rewritten on every settings read');
+    await f.api.persistSettingsNow();
+    const reloaded = await fixture(f.savedPreferences.at(-1).auto_large_summary);
+    assert.deepEqual(structuredClone(reloaded.api.state().settings.prompts), structuredClone(f.api.state().settings.prompts));
+    const legacy = await fixture({ prompt: defaults.incremental.replaceAll('{{user}}', '结城爱') });
+    assert.equal(legacy.api.state().settings.prompts.incremental, defaults.incremental);
+});
+
+test('default-name migration keeps customized templates unchanged even if they mention the same name', async () => {
+    const defaults = await fixture();
+    const incremental = defaults.api.state().settings.prompts.incremental.replaceAll('{{user}}', '结城爱') + '\n这是我修改后的自定义要求';
+    const merged = '自定义角色关系：结城爱 / {{user}}\n保持原文';
+    const f = await fixture({ prompts: { incremental, merged } });
+    assert.equal(f.api.state().settings.prompts.incremental, incremental);
+    assert.equal(f.api.state().settings.prompts.merged, merged);
+});
+
+test('both summary modes expand the user macro through ST before sending while preserving the saved template', async () => {
+    for (const mode of ['incremental', 'merged']) {
+        const f = await fixture({ mode });
+        f.prepareSummary();
+        const template = f.api.state().settings.prompt;
+        let calls = 0;
+        f.context.substituteParamsExtended = async text => {
+            calls++;
+            assert.equal(text, template);
+            return text.replaceAll('{{user}}', '当前用户角色');
+        };
+        f.sandbox.__fixtures.capture = prompt => {
+            assert.equal((prompt.match(/关键角色和当前用户角色之间/g) ?? []).length, 2);
+            assert.ok(!prompt.includes('{{user}}'));
+            assert.ok(!prompt.includes('结城爱'));
+            return '<details><summary>大总结</summary>事件记录</details>';
+        };
+        f.api.evaluate('requestMainApiSummary = async (_context, prompt) => __fixtures.capture(prompt)');
+        assert.equal(await f.api.runLargeSummary(), true);
+        assert.equal(calls, 1);
+        assert.equal(f.api.state().settings.prompt, template);
+        assert.ok(f.api.state().settings.prompt.includes('{{user}}'));
+    }
+});
+
 test('saving or resetting ordinary settings does not replace either saved custom prompt', async () => {
     const f = await fixture({ prompts: { incremental: '增量自定义', merged: '合并自定义' } });
     f.api.evaluate(`scheduleChatSync = async () => {}; settingsDraft.keepRecent = 15; settingsDraft.mode = 'merged'`);
