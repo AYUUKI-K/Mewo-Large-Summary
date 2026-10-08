@@ -13,7 +13,7 @@ import { readSummaryStream, summaryResponseError, supportsSummaryStream } from '
 
 const MODULE_NAME = 'auto_large_summary';
 const ENTRY_MARKER = 'auto_large_summary';
-const EXTENSION_VERSION = '1.2.5';
+const EXTENSION_VERSION = '1.2.6';
 const SUMMARY_INJECTION_ID = 'meow_large_summary_instruction';
 
 let settings;
@@ -2631,7 +2631,7 @@ function syncActionState() {
         + (journal?.phase === 'saved' ? '总结已保存，隐藏尚待确认，可只重试隐藏。' : journal?.phase === 'undone' ? '最近一次总结已撤销。' : '')
         + (journal?.messagesRestored ? '本轮隐藏的消息已恢复。' : '')
         : '当前存档暂无总结。';
-    floatingPanel?.update({ busy: Boolean(activeRun || sendLockDepth), enabled: settings.enabled, tokens: archive?.lastPromptTokens });
+    floatingPanel?.update({ busy: Boolean(activeRun || sendLockDepth), enabled: settings.enabled, autoEnabled: settings.autoEnabled, tokens: archive?.lastPromptTokens });
     syncEditorActions();
 }
 
