@@ -63,7 +63,7 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     const header = document.createElement('div');
     header.className = 'als-floating-header';
     header.hidden = true;
-    header.innerHTML = '<div class="als-floating-title"><button type="button" class="als-floating-grip" aria-label="移动悬浮窗口，方向键微调位置，Home 键复位" title="拖动标题栏移动；方向键微调，Home 键复位"><span class="als-mascot als-header-mascot" aria-hidden="true"></span><span>喵喵大总结</span><span class="als-grip-dots" aria-hidden="true">⠿</span></button><div class="als-floating-modes" role="status" aria-live="polite">' + modeMarkup + '</div></div><button type="button" class="als-icon-button als-floating-minimize" aria-label="收起悬浮窗口" title="收起悬浮窗口"><span aria-hidden="true">−</span></button><button type="button" class="als-icon-button als-floating-close" aria-label="关闭悬浮窗口及入口" title="关闭悬浮窗口及入口，可从扩展面板重新打开"><span aria-hidden="true">×</span></button>';
+    header.innerHTML = '<div class="als-floating-title"><button type="button" class="als-floating-grip" aria-label="移动悬浮窗口，方向键微调位置，Home 键复位" title="拖动标题栏移动；方向键微调，Home 键复位"><span class="als-mascot als-header-mascot" aria-hidden="true"></span><span>喵喵大总结</span><span class="als-grip-dots" aria-hidden="true">⠿</span></button><div class="als-floating-modes" role="status" aria-live="polite">' + modeMarkup + '</div></div><button type="button" class="als-icon-button als-floating-minimize" aria-label="收起悬浮窗口" title="收起悬浮窗口"><span aria-hidden="true">−</span></button><button type="button" class="als-text-button als-floating-close" title="关闭悬浮窗和猫咪入口，可从扩展面板重新打开">关闭悬浮窗</button>';
     root.prepend(header);
     const handle = header.querySelector('.als-floating-grip');
     const opener = root.querySelector('.als-open-floating');
