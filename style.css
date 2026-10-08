@@ -223,6 +223,7 @@ body.als-send-locked :is(#send_but, #option_continue, #option_regenerate, .swipe
 .als-floating-shell { position: fixed; z-index: 3001; right: 20px; bottom: 88px; width: auto; margin: 0; container-type: normal; }
 .als-floating-shell[hidden] { display: none !important; }
 .als-floating-header .als-icon-button { flex: 0 0 auto; font-size: 20px; }
+.als-floating-header .als-floating-close { flex: 0 0 auto; }
 .als-float-launcher { display: flex; align-items: center; gap: 8px; min-height: 64px; padding: 4px 12px 4px 4px; border: 1px solid var(--als-control-line); border-radius: 18px; background: var(--als-paper); color: var(--als-ink); cursor: pointer; font-size: 12px !important; }
 .als-launcher-mascot { width: 60px; height: 60px; }
 .als-launcher-label { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; font-weight: 500; }

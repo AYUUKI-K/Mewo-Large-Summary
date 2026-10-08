@@ -13,7 +13,7 @@ import { readSummaryStream, summaryResponseError, supportsSummaryStream } from '
 
 const MODULE_NAME = 'auto_large_summary';
 const ENTRY_MARKER = 'auto_large_summary';
-const EXTENSION_VERSION = '1.2.6';
+const EXTENSION_VERSION = '1.2.7';
 const SUMMARY_INJECTION_ID = 'meow_large_summary_instruction';
 
 let settings;
