@@ -26,7 +26,7 @@ export function settingsMarkup(version) {
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
-          <div class="als-topline"><span class="als-tagline">让故事继续，让记忆留下。</span><button type="button" class="als-icon-button als-open-floating" aria-label="打开悬浮面板" title="打开悬浮面板">${uiIcon('window')}</button><label class="als-switch als-master"><span>启用</span><input class="als-enabled" type="checkbox" aria-label="启用插件"><span class="als-switch-track" aria-hidden="true"></span></label></div>
+          <div class="als-topline"><span class="als-tagline">让故事继续，让记忆留下。</span><button type="button" class="als-icon-button als-open-floating" aria-label="打开悬浮面板" title="打开悬浮面板（也可恢复已关闭的入口）">${uiIcon('window')}</button><label class="als-switch als-master"><span>启用</span><input class="als-enabled" type="checkbox" aria-label="启用插件"><span class="als-switch-track" aria-hidden="true"></span></label></div>
           <div class="als-update-notice" hidden><span class="als-update-title"></span><button type="button" class="menu_button als-update-apply">更新</button><button type="button" class="als-update-dismiss als-icon-button" aria-label="关闭更新提示">×</button></div>
           <div class="als-tabs" role="tablist" aria-label="喵喵大总结">
             ${tab('overview', '概览', 'book', true)}${tab('settings', '设置', 'tune')}${tab('prompt', '提示词', 'pen')}${tab('directory', '记录', 'archive')}
@@ -86,6 +86,9 @@ export function settingsMarkup(version) {
                 <label class="als-field">副 API 模型<select class="text_pole als-model-select" aria-label="选择副 API 模型"></select></label>
                 <label class="als-field als-model-manual-field" hidden>手动填写模型名<input class="text_pole als-secondary-model" type="text" placeholder="输入完整模型 ID" autocomplete="off" spellcheck="false"></label>
               </div>
+            </section>
+            <section class="als-form-section"><h4>界面</h4>
+              <label class="als-switch als-switch-row"><span><strong>显示悬浮入口</strong><small>立即生效，记住当前浏览器的选择。关闭后仍可从扩展面板打开。</small></span><input class="als-floating-visible" type="checkbox" aria-label="显示悬浮入口"><span class="als-switch-track" aria-hidden="true"></span></label>
             </section>
             <details class="als-disclosure als-advanced"><summary>${uiIcon('tune')}<span>世界书与指令位置</span><span class="als-disclosure-note">高级设置</span></summary><div class="als-disclosure-body">
               <label class="als-field">世界书名称<input class="text_pole als-book" type="text" maxlength="80"></label>

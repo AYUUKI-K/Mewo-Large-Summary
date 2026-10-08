@@ -1,6 +1,7 @@
 const STORAGE_KEY = 'meow-large-summary-panel-v1';
 const mounted = new WeakMap();
 const finite = (value, fallback) => Number.isFinite(value) ? value : fallback;
+const modeMarkup = '<span class="als-float-modes"><span class="als-float-mode als-plugin-mode">插件开启</span><span class="als-float-mode als-auto-mode">自动开启</span></span>';
 
 export function clampPanelFrame(frame = {}, viewport) {
     if (!frame || typeof frame !== 'object') frame = {};
@@ -28,8 +29,9 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') ?? {}; } catch { /* Preferences are optional. */ }
     let open = false;
+    let visible = saved.visible !== false;
     let drag = null;
-    let frame = null;
+    let frame = saved.frame ?? null;
     let launcherPosition = saved.launcherPosition ?? null;
     let saveTimer;
     const lifecycle = new AbortController();
@@ -53,22 +55,35 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     launcher.setAttribute('aria-label', '打开总结悬浮窗口');
     launcher.setAttribute('aria-controls', root.id);
     launcher.setAttribute('aria-expanded', 'false');
-    launcher.innerHTML = '<span class="als-mascot als-launcher-mascot" aria-hidden="true"></span><span class="als-launcher-label"><span>总结</span><small class="als-launcher-count"></small></span><span class="als-launcher-status" aria-hidden="true"></span>';
+    launcher.innerHTML = '<span class="als-mascot als-launcher-mascot" aria-hidden="true"></span><span class="als-launcher-label"><span class="als-launcher-caption"><span>总结</span><small class="als-launcher-count"></small></span><span class="als-float-mode als-launcher-mode">自动</span></span><span class="als-launcher-status" aria-hidden="true"></span>';
     shell.append(launcher);
+    shell.hidden = !visible;
     document.body.append(shell);
 
     const header = document.createElement('div');
     header.className = 'als-floating-header';
     header.hidden = true;
-    header.innerHTML = '<button type="button" class="als-floating-grip" aria-label="移动悬浮窗口，方向键微调位置，Home 键复位" title="拖动标题栏移动；方向键微调，Home 键复位"><span class="als-mascot als-header-mascot" aria-hidden="true"></span><span>喵喵大总结</span><span class="als-grip-dots" aria-hidden="true">⠿</span></button><button type="button" class="als-icon-button als-floating-close" aria-label="收起悬浮窗口" title="收起悬浮窗口"><span aria-hidden="true">−</span></button>';
+    header.innerHTML = '<div class="als-floating-title"><button type="button" class="als-floating-grip" aria-label="移动悬浮窗口，方向键微调位置，Home 键复位" title="拖动标题栏移动；方向键微调，Home 键复位"><span class="als-mascot als-header-mascot" aria-hidden="true"></span><span>喵喵大总结</span><span class="als-grip-dots" aria-hidden="true">⠿</span></button><div class="als-floating-modes" role="status" aria-live="polite">' + modeMarkup + '</div></div><button type="button" class="als-icon-button als-floating-minimize" aria-label="收起悬浮窗口" title="收起悬浮窗口"><span aria-hidden="true">−</span></button><button type="button" class="als-icon-button als-floating-close" aria-label="关闭悬浮窗口及入口" title="关闭悬浮窗口及入口，可从扩展面板重新打开"><span aria-hidden="true">×</span></button>';
     root.prepend(header);
     const handle = header.querySelector('.als-floating-grip');
     const opener = root.querySelector('.als-open-floating');
+    const visibilityToggle = root.querySelector('.als-floating-visible');
+    const syncVisibility = () => {
+        shell.hidden = open || !visible;
+        if (visibilityToggle) visibilityToggle.checked = visible;
+    };
+    const focusHome = () => {
+        if (opener?.getClientRects().length) { opener.focus(); return; }
+        const drawerHeader = root.querySelector('.inline-drawer-header');
+        if (!drawerHeader) return;
+        if (!drawerHeader.hasAttribute('tabindex')) drawerHeader.setAttribute('tabindex', '-1');
+        drawerHeader.focus();
+    };
 
     const persist = (immediate = false) => {
         clearTimeout(saveTimer);
         const write = () => {
-            try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ open, frame, launcherPosition })); } catch { /* Private mode can reject writes. */ }
+            try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ open, visible, frame, launcherPosition })); } catch { /* Private mode can reject writes. */ }
         };
         if (immediate) write();
         else saveTimer = setTimeout(write, 120);
@@ -78,7 +93,7 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
         Object.assign(root.style, { left: frame.x + 'px', top: frame.y + 'px', width: frame.width + 'px', height: frame.height + 'px' });
     };
     const applyLauncherPosition = next => {
-        if (open) return;
+        if (open || !visible) return;
         launcherPosition = clampLauncherPosition(next, shell.getBoundingClientRect(), viewport());
         Object.assign(shell.style, { left: launcherPosition.x + 'px', top: launcherPosition.y + 'px', right: 'auto', bottom: 'auto' });
     };
@@ -99,15 +114,27 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
         for (const property of ['left', 'top', 'width', 'height']) root.style.removeProperty(property);
         home.after(root);
         home.hidden = true;
-        shell.hidden = false;
+        syncVisibility();
         if (launcherPosition) applyLauncherPosition(launcherPosition);
         launcher.setAttribute('aria-expanded', 'false');
         persist(true);
-        if (focusDock) opener?.focus();
+        if (focusDock || !visible) focusHome();
         else launcher.focus();
+    };
+    const setVisible = value => {
+        visible = Boolean(value);
+        if (!visible && open) close({ focusDock: true });
+        syncVisibility();
+        if (visible && launcherPosition) applyLauncherPosition(launcherPosition);
+        persist(true);
+    };
+    const dismiss = () => {
+        setVisible(false);
+        focusHome();
     };
     const show = ({ focus = true } = {}) => {
         if (open) { if (focus) handle.focus(); return; }
+        visible = true;
         open = true;
         document.body.append(root);
         root.classList.add('als-floating');
@@ -116,7 +143,7 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
         root.setAttribute('aria-label', '喵喵大总结悬浮面板');
         header.hidden = false;
         home.hidden = false;
-        shell.hidden = true;
+        syncVisibility();
         launcher.setAttribute('aria-expanded', 'true');
         applyFrame(frame ?? saved.frame);
         onOpen();
@@ -125,8 +152,10 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     };
     const on = (target, event, callback) => target?.addEventListener(event, callback, options);
     on(opener, 'click', () => show());
+    on(visibilityToggle, 'change', () => setVisible(visibilityToggle.checked));
     on(dock, 'click', () => close({ focusDock: true }));
-    on(header.querySelector('.als-floating-close'), 'click', () => close());
+    on(header.querySelector('.als-floating-minimize'), 'click', () => close());
+    on(header.querySelector('.als-floating-close'), 'click', dismiss);
     on(root, 'keydown', event => {
         if (open && event.key === 'Escape' && !event.defaultPrevented && event.target.tagName !== 'SELECT') {
             event.preventDefault();
@@ -181,7 +210,7 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
         });
     };
     bindMovement(handle, () => open, () => root.getBoundingClientRect(), position => applyFrame({ ...frame, ...position }), () => applyFrame({ ...frame, x: undefined, y: undefined }));
-    bindMovement(launcher, () => !open, () => shell.getBoundingClientRect(), applyLauncherPosition, () => {
+    bindMovement(launcher, () => !open && visible, () => shell.getBoundingClientRect(), applyLauncherPosition, () => {
         launcherPosition = null;
         for (const property of ['left', 'top', 'right', 'bottom']) shell.style.removeProperty(property);
     });
@@ -204,13 +233,27 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     });
     observer.observe(root);
     observer.observe(shell);
+    syncVisibility();
     if (launcherPosition) applyLauncherPosition(launcherPosition);
     const controller = {
-        open: show, close,
-        update({ busy = false, enabled = true, tokens } = {}) {
+        open: show, close, setVisible,
+        update({ busy = false, enabled = true, autoEnabled = true, tokens } = {}) {
+            const pluginState = enabled ? '插件已开启' : '插件已关闭';
+            const autoState = !autoEnabled ? (enabled ? '自动总结已关闭，可手动总结' : '自动总结已关闭，启用插件后可手动总结')
+                : enabled ? '自动总结已开启，达到阈值后自动整理' : '自动总结开关已开启，插件关闭时暂停';
+            const updateMode = (node, text, state, description) => {
+                if (node.textContent !== text) node.textContent = text;
+                node.dataset.state = state;
+                node.title = description;
+                node.setAttribute('aria-label', description);
+            };
+            updateMode(header.querySelector('.als-plugin-mode'), enabled ? '插件开启' : '插件关闭', enabled ? 'on' : 'off', pluginState);
+            updateMode(header.querySelector('.als-auto-mode'), !autoEnabled ? '自动关闭' : enabled ? '自动开启' : '自动暂停', !autoEnabled ? 'off' : enabled ? 'on' : 'paused', autoState);
+            updateMode(shell.querySelector('.als-launcher-mode'), !enabled ? '停用' : autoEnabled ? '自动' : '手动', !enabled ? 'off' : autoEnabled ? 'on' : 'manual', `${pluginState}；${autoState}`);
             launcher.classList.toggle('als-launcher-busy', busy);
             launcher.classList.toggle('als-launcher-paused', !enabled);
-            launcher.title = (busy ? '总结任务处理中' : enabled ? '打开总结与记忆面板' : '插件已关闭 · 可查看历史') + ' · 拖动移动，点击打开；方向键微调，Home 键复位';
+            launcher.setAttribute('aria-label', `打开总结悬浮窗口，${pluginState}，${autoState}`);
+            launcher.title = (busy ? '总结任务处理中' : '打开总结与记忆面板') + ` · ${pluginState} · ${autoState} · 拖动移动，点击打开；方向键微调，Home 键复位`;
             launcher.querySelector('.als-launcher-count').textContent = Number.isFinite(tokens)
                 ? (tokens >= 1000 ? (tokens / 1000).toFixed(tokens >= 10000 ? 0 : 1) + 'k' : String(tokens)) : '';
         },
@@ -227,6 +270,6 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
         },
     };
     mounted.set(root, controller);
-    if (saved.open) show({ focus: false });
+    if (saved.open && visible) show({ focus: false });
     return controller;
 }
