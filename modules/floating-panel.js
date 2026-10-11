@@ -43,7 +43,7 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     const dock = document.createElement('button');
     dock.type = 'button';
     dock.className = 'menu_button';
-    dock.textContent = '喵喵大总结已在悬浮窗口打开 · 收回到这里';
+    dock.innerHTML = '<span>喵喵大总结 · 悬浮窗已打开</span><span class="als-dock-action">收回这里</span>';
     home.append(dock);
     root.before(home);
 

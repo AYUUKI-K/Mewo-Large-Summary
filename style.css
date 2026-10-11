@@ -17,16 +17,15 @@
     --als-radius-page: 12px;
     container: als-panel / inline-size;
     box-sizing: border-box;
-    margin: 8px 0;
+    margin: 0;
     min-width: 0;
-    font-size: 14px;
-    line-height: 1.5;
+    font-size: inherit;
+    line-height: inherit;
     -webkit-font-smoothing: antialiased;
 }
 .als-settings :where(*, *::before, *::after) { box-sizing: border-box; }
 .als-settings [hidden] { display: none !important; }
-.als-settings .inline-drawer-content { gap: 0; padding: 4px 0 0; }
-.als-settings .inline-drawer-header { padding-block: 8px; }
+.als-settings .inline-drawer-content { gap: 0; padding: 4px 0 0; font-size: 14px; line-height: 1.5; }
 .als-settings :where(h3, h4, p) { margin: 0; }
 .als-settings :where(h3, h4) { color: inherit; text-wrap: balance; }
 .als-settings h3 { font-size: 18px; font-weight: 600; line-height: 1.45; }
@@ -59,10 +58,10 @@
 .als-settings .als-danger { color: var(--als-ink-secondary); border-color: color-mix(in srgb, var(--als-clay) 36%, transparent); }
 .als-settings .als-danger:not(:disabled):hover { background: color-mix(in srgb, var(--als-clay) 14%, transparent); border-color: var(--als-clay); }
 .als-icon { width: 18px; height: 18px; flex: 0 0 auto; vertical-align: middle; }
-.als-heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.als-heading { display: flex; align-items: center; gap: 5px; min-width: 0; }
 .als-mascot { display: block; width: 40px; height: 40px; flex: 0 0 auto; background: url("assets/mewo-note-cat.png") center / contain no-repeat; pointer-events: none; }
-.als-brand-mark { width: 32px; height: 32px; }
-.als-heading b { font-size: 15px; font-weight: 600; }
+.als-brand-mark { width: 1em; height: 1em; }
+.als-heading b { font-size: inherit; font-weight: inherit; }
 .als-topline { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
 .als-topline .als-tagline { flex: 1; }
 .als-tagline { color: var(--als-ink-muted); font-size: 12px; }
@@ -259,9 +258,18 @@ body.als-send-locked :is(#send_but, #option_continue, #option_regenerate, .swipe
 .als-floating .als-open-floating { display: none; }
 .als-floating .als-reading { max-height: none; overflow: visible; }
 .als-floating .als-topline { margin-top: 4px; }
-.als-dock-placeholder { padding: 12px 0; font-size: 12px; }
+.als-dock-placeholder { box-sizing: border-box; width: 100%; min-width: 0; margin-bottom: 5px; font-size: 12px; }
 .als-dock-placeholder[hidden] { display: none; }
-.als-dock-placeholder button { white-space: normal; line-height: 1.6; }
+/* This button lives outside .als-settings while the panel is in document.body.
+   Override the host's width: min-content here as well as inside the panel. */
+.als-dock-placeholder > .menu_button {
+    box-sizing: border-box; display: flex; flex-wrap: wrap; align-items: center;
+    justify-content: space-between; gap: 4px 12px; width: 100%; min-width: 0;
+    max-width: 100%; min-height: 44px; margin: 0; padding: 6px 8px;
+    font: inherit; color: inherit; line-height: 1.5; text-align: left;
+}
+.als-dock-placeholder > .menu_button > span { white-space: nowrap; }
+.als-dock-action { font-weight: 600; }
 @container als-panel (max-width: 360px) {
     .als-tab { gap: 4px; }
     .als-tab .als-icon { display: none; }
