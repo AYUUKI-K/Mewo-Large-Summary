@@ -26,6 +26,10 @@ body.light{background:#f5f3ee;color:#303932;--SmartThemeBodyColor:#303932;--Smar
 </style><main><h1>本地模拟宿主 · 无真实 API 请求</h1><button id="theme">切换浅色主题</button><details id="fixture-controls"><summary>测试场景</summary><button id="fixture-new">新建测试存档</button><label><input type="checkbox" id="fixture-hide">模拟隐藏失败</label></details><section id="extensions_settings2"><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>向量存储</b><span class="inline-drawer-icon fixture-chevron" aria-hidden="true"></span></div></div><div class="inline-drawer"><div class="inline-drawer-toggle inline-drawer-header"><b>柏宝箱</b><span class="inline-drawer-icon fixture-chevron" aria-hidden="true"></span></div></div></section><select id="world_info" multiple></select><form id="form_sheld"><textarea id="send_textarea" placeholder="模拟聊天输入"></textarea><button type="button" id="send_but">发送</button></form><p id="notice" role="status"></p></main>
 <script src="/fixture/purify.js"></script><script src="/fixture/showdown.js"></script>
 <script type="module">
+const hostMode = new URLSearchParams(location.search).get('host') || 'modern';
+const legacy = hostMode === '1.14';
+if(hostMode === 'tauri') window.__TAURITAVERN_HOST__={platform:'android',kind:'mobile'};
+if(legacy || hostMode === 'tauri'){AbortSignal.any=undefined;AbortSignal.timeout=undefined;}
 const handlers = new Map();
 const eventSource = {
  on(event, fn) { if(!handlers.has(event)) handlers.set(event, new Set()); handlers.get(event).add(fn); },
@@ -34,6 +38,7 @@ const eventSource = {
  async emit(event, ...args) { for(const fn of [...(handlers.get(event) ?? [])]) await fn(...args); }
 };
 const eventTypes=Object.fromEntries(['APP_READY','SETTINGS_UPDATED','GENERATION_STARTED','GENERATION_AFTER_COMMANDS','GENERATE_AFTER_DATA','CHAT_COMPLETION_SETTINGS_READY','WORLDINFO_SCAN_DONE','MESSAGE_RECEIVED','MESSAGE_SENT','MESSAGE_DELETED','MESSAGE_UPDATED','MESSAGE_SWIPED','GENERATION_ENDED','CHAT_CHANGED','CHAT_CREATED'].map(x=>[x,x]));
+if(legacy){delete eventTypes.WORLDINFO_SCAN_DONE;eventTypes.WORLDINFO_ENTRIES_LOADED='WORLDINFO_ENTRIES_LOADED';}
 const saved=JSON.parse(localStorage.getItem('mewo-smoke-state') || 'null');
 const context={
  chatId:saved?.chatId ?? 'smoke-chat',characterId:0,characters:[{name:'测试角色',avatar:'smoke.png',chat:'smoke-chat'}],groupId:null,
@@ -42,7 +47,7 @@ const context={
  eventSource,eventTypes,mainApi:'openai',chatCompletionSettings:{openai_max_tokens:8192,chat_completion_source:'custom'},powerUserSettings:{},name1:'用户',name2:'测试角色',
  getRequestHeaders:()=>({'Content-Type':'application/json'}),getCurrentChatId:()=>context.chatId,
  async saveMetadata(){persist()},saveMetadataDebounced(){persist()},saveSettingsDebounced(){},
- async updateWorldInfoList(){const names=await (await fetch('/fixture/books')).json(); context.worldNames=names;const select=document.querySelector('#world_info');const old=[...select.selectedOptions].map(o=>o.value);select.replaceChildren(...names.map(n=>{const o=new Option(n,n);o.selected=old.includes(n);return o}));},
+ async updateWorldInfoList(){const names=await (await fetch('/fixture/books')).json(); context.worldNames=names;if(legacy)(await import('/scripts/world-info.js')).setNames(names);const select=document.querySelector('#world_info');const old=[...select.selectedOptions].map(o=>o.value);select.replaceChildren(...names.map(n=>{const o=new Option(n,n);o.selected=old.includes(n);return o}));},
  getWorldInfoNames:()=>context.worldNames ?? [],
  async saveWorldInfo(name,data){await fetch('/fixture/save',{method:'POST',headers:context.getRequestHeaders(),body:JSON.stringify({name,data})})},reloadWorldInfoEditor(){},
  substituteParamsExtended:value=>value.replaceAll('{{user}}','用户'),
@@ -55,14 +60,19 @@ const context={
   const messages=context.chat.filter(m=>!m.is_system).map(m=>({role:m.is_user?'user':'assistant',content:m.mes}));
   const {books}=await (await fetch('/fixture/metrics')).json();
   const entries=new Map();
+  const lore={globalLore:[],characterLore:[],chatLore:[],personaLore:[]};
   for(const option of document.querySelector('#world_info').selectedOptions){
    for(const entry of Object.values(books[option.value]?.entries ?? {})){
-    if(entry.disable || !entry.constant || window.smoke.failBudget)continue;
-    entries.set(option.value+'.'+entry.uid,{...entry,world:option.value});
-    messages.unshift({role:'system',content:entry.content});
+    lore.globalLore.push({...entry,world:option.value});
    }
   }
-  await eventSource.emit(eventTypes.WORLDINFO_SCAN_DONE,{activated:{entries}});
+  if(legacy)await eventSource.emit(eventTypes.WORLDINFO_ENTRIES_LOADED,lore);
+  for(const entry of lore.globalLore){
+   if(entry.disable || !entry.constant || window.smoke.failBudget)continue;
+   entries.set(entry.world+'.'+entry.uid,entry);
+   messages.unshift({role:'system',content:entry.content});
+  }
+  if(eventTypes.WORLDINFO_SCAN_DONE)await eventSource.emit(eventTypes.WORLDINFO_SCAN_DONE,{activated:{entries}});
   await eventSource.emit(eventTypes.GENERATE_AFTER_DATA,{prompt:messages},dryRun);
   if(dryRun)return;
   const data={type,messages,model:'fixture',stream:false,fixtureTruncated:window.smoke.truncated};
@@ -76,6 +86,7 @@ const context={
 function persist(){localStorage.setItem('mewo-smoke-state',JSON.stringify({chatId:context.chatId,chat:context.chat,metadata:context.chatMetadata,settings:context.extensionSettings}))}
 context.SlashCommandParser={commands:Object.fromEntries(['hide','unhide'].map(name=>[name,{async callback(args,range){if(window.smoke.failHide&&name==='hide')throw Error('模拟隐藏失败');const [a,b]=range.split('-').map(Number);for(let i=a;i<=Math.min(b,context.chat.length-1);i++)context.chat[i].is_system=name==='hide';persist();return ''}}]))};
 window.smoke={context,persist,failHide:false,failBudget:false,truncated:false,cancelled:false};
+if(legacy)delete context.getWorldInfoNames;
 window.SillyTavern={getContext:()=>context,libs:{DOMPurify:window.DOMPurify,showdown:window.showdown}};
 window.toastr=Object.fromEntries(['info','success','warning','error'].map(kind=>[kind,(text)=>{document.querySelector('#notice').textContent=text;return{text}}]));window.toastr.clear=()=>{};
 document.querySelector('#theme').onclick=()=>document.body.classList.toggle('light');
@@ -111,6 +122,7 @@ const server = http.createServer(async (request, response) => {
         if (url.pathname === '/api/extensions/discover') return send([{ name: 'third-party/Mewo-Large-Summary', type: 'local' }]);
         if (url.pathname === '/api/extensions/version') return send({ isUpToDate: true });
         if (url.pathname === '/script.js') return send(`export const is_send_press=false;export const isGenerating=()=>false;export async function saveSettings(){window.smoke.persist();await window.smoke.context.eventSource.emit('SETTINGS_UPDATED')}`, 'text/javascript');
+        if (url.pathname === '/scripts/world-info.js') return send(`export let world_names=[];export function setNames(names){world_names=names}`, 'text/javascript');
         if (url.pathname === '/scripts/openai.js') return send(`export const promptManager={render(){}};export const getChatCompletionModel=()=> 'fixture';export const createGenerationParameters=async(s,m,t,messages)=>({generate_data:{type:t,messages,model:m}});`, 'text/javascript');
         if (url.pathname === '/scripts/tokenizers.js') return send(`export const countTokensOpenAIAsync=async messages=>Math.ceil(JSON.stringify(messages).length/3);`, 'text/javascript');
         if (url.pathname === '/scripts/extensions/regex/engine.js') return send(`export const regex_placement={WORLD_INFO:5};export const getRegexedString=text=>text;`, 'text/javascript');

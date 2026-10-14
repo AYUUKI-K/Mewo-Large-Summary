@@ -2,18 +2,19 @@ import { LEGACY_DEFAULT_PROMPT, DEFAULT_PROMPT, DEFAULT_MERGED_PROMPT, DEFAULT_S
 import { settingsMarkup, uiIcon } from './modules/settings-ui.js';
 import { renderSummaryReader } from './modules/summary-reader.js';
 import { mountFloatingPanel } from './modules/floating-panel.js';
-import { nativeScript, chatCompletionApi, tokenizerApi, regexApi } from './modules/host-api.js';
+import { nativeScript, chatCompletionApi, tokenizerApi, regexApi, worldInfoNames } from './modules/host-api.js';
 import { activeRecords, archiveTransition, branchRecords, combineRecords, consecutiveRanges, entryRevision, historyDigest, messageFingerprint, recoveryMatches, sourceDescription, textDigest, visibilityChanges } from './modules/summary-model.js';
 import { readWorldBook, saveVerifiedBook } from './modules/world-book.js';
 import { setTaskStage, taskLabel } from './modules/task-state.js';
-import { fetchJson } from './modules/network.js';
+import { fetchJson, combineRequestSignals } from './modules/network.js';
+import { verifyLegacyInjection } from './modules/injection-proof.js';
 import { completionFailure, promptContainsText, summaryOutputFailure } from './modules/generation-validation.js';
 import { buildSummaryMessages, buildSummaryTextPrompt, SUMMARY_TASK_INSTRUCTION } from './modules/summary-prompt.js';
 import { readSummaryStream, summaryResponseError, supportsSummaryStream } from './modules/summary-stream.js';
 
 const MODULE_NAME = 'auto_large_summary';
 const ENTRY_MARKER = 'auto_large_summary';
-const EXTENSION_VERSION = '1.2.8';
+const EXTENSION_VERSION = '1.2.9';
 const SUMMARY_INJECTION_ID = 'meow_large_summary_instruction';
 
 let settings;
@@ -322,7 +323,7 @@ function scheduleDisabledCleanup({ bookName = settings.worldBookName } = {}) {
         try {
             await context.updateWorldInfoList();
             if (!stillDisabled()) return;
-            if (!context.getWorldInfoNames().includes(bookName)) return;
+            if (!(await worldInfoNames(context)).includes(bookName)) return;
             const data = await readWorldBookData(context, bookName);
             if (!stillDisabled()) return;
             const owned = listOwnedEntries(data);
@@ -509,10 +510,18 @@ async function processedPreview(context, data) {
         if (prepared.chat_completion_source === 'custom' && processing && processing !== 'none') {
             // Use the same backend post-processing as the custom API, including
             // strict role alternation, before counting the actual message list.
-            const processed = await fetchJson('/api/backends/chat-completions/process', {
-                method: 'POST', headers: context.getRequestHeaders(),
-                body: JSON.stringify({ messages, type: processing, user_name: prepared.user_name, char_name: prepared.char_name, group_names: prepared.group_names }),
-            }, { signal: activeRun?.controller?.signal, label: '提示词后处理失败' });
+            let processed;
+            try {
+                processed = await fetchJson('/api/backends/chat-completions/process', {
+                    method: 'POST', headers: context.getRequestHeaders(),
+                    body: JSON.stringify({ messages, type: processing, user_name: prepared.user_name, char_name: prepared.char_name, group_names: prepared.group_names }),
+                }, { signal: activeRun?.controller?.signal, label: '提示词后处理失败' });
+            } catch (error) {
+                if (globalThis.__TAURITAVERN_HOST__ && [404, 501].includes(error.status)) {
+                    throw new Error('当前 TauriTavern 缺少提示词后处理预览接口。请将主连接的“自定义提示词后处理”设为“无”后重试；原文未隐藏。');
+                }
+                throw error;
+            }
             if (!Array.isArray(processed.messages)) throw new Error('提示词后处理未返回消息列表。');
             messages = processed.messages;
         }
@@ -538,15 +547,27 @@ async function countAssembledPrompt(context, data) {
 async function verifySummaryInjection(context, entry) {
     updateTaskStage('verifying');
     const event = context.eventTypes?.WORLDINFO_SCAN_DONE;
-    if (!event || !context.eventSource?.removeListener) throw new Error('酒馆缺少世界书扫描确认接口；总结已保留，未隐藏消息。请升级宿主后重试隐藏。');
     const bookName = settings.worldBookName;
     const archiveId = entryMetadata(entry)?.archiveId;
     const { getRegexedString, regex_placement } = await regexApi();
+    const matchesEntry = candidate => candidate.world === bookName
+        && String(candidate.uid) === String(entry.uid) && entryMetadata(candidate)?.archiveId === archiveId;
+    if (!event) {
+        return await verifyLegacyInjection(context, {
+            matchesEntry, assertActive: assertSummaryActive,
+            marker: `MEWO_VERIFY_${randomId()}`,
+            preview: async () => await processedPreview(context, await assemblePrompt(context)),
+            expectedText: async candidate => getRegexedString(
+                context.substituteParamsExtended ? await context.substituteParamsExtended(candidate.content) : candidate.content,
+                regex_placement.WORLD_INFO,
+                { depth: candidate.position === 4 ? (candidate.depth ?? 4) : null, isMarkdown: false, isPrompt: true }),
+        });
+    }
+    if (!context.eventSource?.removeListener) throw new Error('酒馆缺少世界书扫描确认接口；总结已保留，未隐藏消息。');
     let activated = null;
     const observe = scan => {
         const entries = scan?.activated?.entries;
-        activated = entries?.values ? [...entries.values()].find(candidate => candidate.world === bookName
-            && String(candidate.uid) === String(entry.uid) && entryMetadata(candidate)?.archiveId === archiveId) : null;
+        activated = entries?.values ? [...entries.values()].find(matchesEntry) : null;
     };
     context.eventSource.on(event, observe);
     context.eventSource.makeLast?.(event, observe);
@@ -666,14 +687,12 @@ async function fetchSecondaryModels({ silent = false } = {}) {
     const sourceUrl = settingsDraft.secondaryUrl;
     const sourceKey = settingsDraft.secondaryKey;
     try {
-        const response = await fetch('/api/backends/chat-completions/status', {
+        const data = await fetchJson('/api/backends/chat-completions/status', {
             method: 'POST', headers: getContext().getRequestHeaders(),
             body: JSON.stringify({ chat_completion_source: 'custom', custom_url: config.url,
                 custom_include_headers: secondaryHeaders(config) }),
-            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30000)]),
-        });
-        if (!response.ok) throw new Error(`模型没拉到喵（HTTP ${response.status}），检查一下 URL 和 Key。`);
-        const data = await response.json();
+            signal: controller.signal,
+        }, { label: '模型没拉到，请检查 URL 和 Key' });
         if (data?.error || !Array.isArray(data?.data)) throw new Error('喵，副 API 没有返回 OpenAI 格式的模型列表；也可以手填模型名。');
         const models = [...new Set(data.data.map(model => typeof model === 'string' ? model : model?.id)
             .filter(model => typeof model === 'string' && model.trim()).map(model => model.trim()))].sort();
@@ -774,6 +793,7 @@ async function requestMainApiSummary(context, prompt, { sourceOnly = false } = {
         }
         let response;
         if (matches && (secondary || /\/api\/backends\/chat-completions\/generate(?:[?#]|$)/.test(url))) {
+            const requestSignals = combineRequestSignals([init.signal, task?.controller?.signal]);
             try {
                 assertSummaryActive();
                 const original = JSON.parse(init.body);
@@ -781,8 +801,7 @@ async function requestMainApiSummary(context, prompt, { sourceOnly = false } = {
                 const streaming = settings.streamSummary && supportsSummaryStream(payload);
                 payload.stream = Boolean(streaming);
                 payload.n = 1;
-                const signals = [init.signal, task?.controller?.signal].filter(Boolean);
-                const signal = signals.length > 1 ? AbortSignal.any(signals) : signals[0];
+                const signal = requestSignals.signal;
                 if (task) task.stream = { enabled: streaming, text: '', chars: 0, thinking: false, startedAt: Date.now() };
                 syncTaskState();
                 response = await originalFetch.call(globalThis, secondary ? '/api/backends/chat-completions/generate' : input, {
@@ -819,6 +838,8 @@ async function requestMainApiSummary(context, prompt, { sourceOnly = false } = {
             } catch (error) {
                 request.error = error;
                 throw error;
+            } finally {
+                requestSignals.dispose();
             }
         }
         response = await originalFetch.call(globalThis, input, init);
@@ -1131,7 +1152,7 @@ async function ensureWorldBook(context = getContext()) {
         throw new Error('世界书名称包含不支持的文件名字符，请修改后重试。');
     }
 
-    if (typeof context?.updateWorldInfoList !== 'function' || typeof context?.getWorldInfoNames !== 'function') {
+    if (typeof context?.updateWorldInfoList !== 'function') {
         throw new Error('当前 SillyTavern 没有提供世界书列表接口，请更新到稳定版后重试。');
     }
 
@@ -1153,13 +1174,13 @@ async function prepareWorldBook(context, name, { create = true, readOnly = false
     if ((!settings.enabled && !readOnly) || revision !== enabledRevision) return null;
     // /worldinfo/get returns an empty dummy book even when no file exists.
     // Only the refreshed file list can establish whether creation is needed.
-    if (!context.getWorldInfoNames().includes(name)) {
+    if (!(await worldInfoNames(context)).includes(name)) {
         if (!create) return null;
         await context.saveWorldInfo(name, { entries: {} }, true);
         if (!settings.enabled || revision !== enabledRevision) return null;
         await context.updateWorldInfoList();
         if (!settings.enabled || revision !== enabledRevision) return null;
-        if (!context.getWorldInfoNames().includes(name)) {
+        if (!(await worldInfoNames(context)).includes(name)) {
             throw new Error(`酒馆没有确认创建世界书“${name}”。请查看控制台或服务器日志后重试。`);
         }
     }
@@ -1220,7 +1241,7 @@ async function updateWorldBookStatus() {
     try {
         await context.updateWorldInfoList();
         if (!settings.enabled || revision !== enabledRevision) return;
-        const exists = context.getWorldInfoNames().includes(settings.worldBookName);
+        const exists = (await worldInfoNames(context)).includes(settings.worldBookName);
         const mounted = [...document.querySelectorAll('#world_info option')]
             .some(option => option.textContent?.trim() === settings.worldBookName && option.selected);
         label.textContent = !exists ? '还没建好喵 · 首次总结会自动创建并全局启用'
@@ -2793,11 +2814,8 @@ async function checkForUpdate({ silent = false } = {}) {
                 try {
                     const branch = version.currentBranchName.split('/').map(encodeURIComponent).join('/');
                     const url = `https://raw.githubusercontent.com/${encodeURIComponent(remote[1])}/${encodeURIComponent(remote[2])}/${branch}/manifest.json`;
-                    const response = await fetch(url, { cache: 'no-store', signal: AbortSignal.timeout(10000) });
-                    if (response.ok) {
-                        const manifest = await response.json();
-                        if (typeof manifest.version === 'string') remoteVersion = manifest.version;
-                    }
+                    const manifest = await fetchJson(url, { cache: 'no-store' }, { timeoutMs: 10000 });
+                    if (typeof manifest?.version === 'string') remoteVersion = manifest.version;
                 } catch { /* The ST Git check remains authoritative if version labels cannot be read. */ }
             }
             if (cancelled()) return;

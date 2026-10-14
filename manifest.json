@@ -4,7 +4,8 @@
   "js": "index.js",
   "css": "style.css",
   "author": "NUE-喵喵电波",
-  "version": "1.2.8",
+  "version": "1.2.9",
+  "minimum_client_version": "1.14.0",
   "generate_interceptor": "meowLargeSummaryGenerationInterceptor",
   "auto_update": false,
   "hooks": {
