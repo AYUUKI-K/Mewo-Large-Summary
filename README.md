@@ -1,8 +1,16 @@
 # 喵喵大总结
 
-版本：1.2.8 | by NUE-喵喵电波
+版本：1.2.9 | by NUE-喵喵电波
 
 喵！这是 mewo 系列的 SillyTavern 大总结扩展。默认使用酒馆主 API，也可以选自己配置的 OpenAI 兼容副 API；每个角色卡的聊天档一个世界书条目，总结保存确认后，只隐藏一次旧楼层。
+
+## 1.2.9 兼容适配
+
+- 适配目标为 SillyTavern 1.14–1.18；已核对各系列的 `.0` 官方标签。1.14–1.17 缺少 context 世界书名称接口时，从宿主的世界书模块读取实时列表，避免把已有书误判为不存在。
+- 1.14 缺少世界书扫描完成事件时，先验证正常提示词，再用临时副本中的唯一标记验证条目来源。两次均为原生 dry-run，不调用模型、不把标记保存进世界书。预算不足、正则移除正文或无法确认来源时仍不隐藏原文；1.15 起沿用扫描事件确认。
+- 总结取消、拉模型和检查更新不再依赖较新 WebView 才有的 `AbortSignal.any/timeout/throwIfAborted`，保留宿主原有 fetch 桥接，结束后清理取消监听。
+- TauriTavern Canary `21477e44e0ec`（2026-10-12）可作为有条件试用目标：**主连接的“自定义提示词后处理”请设为“无”**。该版本有实际生成后处理，但缺少预览路由；启用后处理时明确报错，不以未处理的提示词代替验证。副 API 仍限 OpenAI 兼容接口。
+- 验证包括 213 项隔离回归、6 个宿主源码契约检查及 1.14/Tauri 接口形态的浏览器模拟流程。尚未对真实五版酒馆、Tauri 安装包或付费模型做端到端验证；详细范围和固定源码见 [兼容性说明](COMPATIBILITY.md)。
 
 ## 1.2.8 更新喵
 
@@ -177,10 +185,19 @@
 ## 开发检查
 
 ```sh
-node --experimental-vm-modules --test tests/regression.mjs tests/regressions.cjs tests/ui-model.mjs tests/summary-stream.mjs
+node --experimental-vm-modules --test tests/regression.mjs tests/regressions.cjs tests/ui-model.mjs tests/summary-stream.mjs tests/host-compatibility.mjs
 node --check index.js
 node tests/ui-smoke.mjs 8786
 ```
+
+模拟页可使用 `?host=1.14` 测试旧世界书接口，或 `?host=tauri` 测试宿主标记与缺少新版 AbortSignal 静态方法的场景。它们不是真实酒馆客户端。固定源码核对可单独运行：
+
+```sh
+node scripts/fetch-compat-hosts.mjs
+node --test tests/host-contracts.mjs
+```
+
+下载只写入忽略的 `output/hosts`，不改动任何用户酒馆；没有下载源码时，源码检查会明确标为 skipped。
 
 隔离回归测试覆盖原有生成、命令、阈值、保存、主/副 API、提示词和更新流程；包括自动开关、无新消息合并、聊天/文本补全的独立资料输入、分支隔离与继承、重命名、取消、隐藏重试、撤销、刷新后的恢复、原文/swipe/手动可见性保护、元数据保存失败后的重试与幂等性，以及浮窗边界、手动模式下的显示刷新和阅读器的纯文本降级。1.2.1 增加截断与过滤响应、预算或正则拦截、注入确认后的隐藏重试、世界书切换回滚、取消挂起读回、响应体读取超时和读写次数回归。
 
@@ -190,6 +207,6 @@ node tests/ui-smoke.mjs 8786
 
 `modules/summary-model.js` 保存纯数据规则，`summary-prompt.js` 将总结任务与上下文资料分开，`world-book.js` 封装读写确认，`network.js` 管理请求取消与超时，`generation-validation.js` 检查响应完成状态与提示词正文，`task-state.js` 管理阶段文案，`settings.js` 和 `settings-ui.js` 管理配置及界面模板，`floating-panel.js` 管理悬浮窗口，`summary-reader.js` 处理安全阅读，`host-api.js` 集中酒馆内部导入。入口负责宿主事件与任务协调。
 
-本次接口核对以 SillyTavern 官方 1.19.0 源码为参考，分支身份使用其聊天 `integrity` 字段；没有该字段的宿主按存档名变化保守隔离。回归测试和模拟宿主检查不代表真实宿主兼容性验证；用户实际安装版本、第三方插件组合和主/副 API 仍需在酒馆中验证。
+历史实现以 SillyTavern 官方 1.19.0 为参考；1.2.9 补查了 1.14.0–1.18.0 和固定 Canary 提交。分支身份使用聊天 `integrity` 字段；没有该字段的宿主按存档名变化保守隔离。回归测试和模拟宿主检查不代表真实宿主兼容性验证；用户实际安装版本、第三方插件组合和主/副 API 仍需在酒馆中验证。
 
-隐藏前确认使用 1.19.0 的 `WORLDINFO_SCAN_DONE` 及世界书正则接口。缺少接口时保留原文；第三方模板若进一步改写总结、导致无法确认完整正文，也会保守停止隐藏并说明原因。此检查确认当前预览的注入，不保证用户之后修改预算、预设或其他世界书时仍能注入。
+隐藏前确认优先使用 `WORLDINFO_SCAN_DONE` 及世界书正则接口，1.14 使用两次 dry-run 来源确认。缺少两条验证路径时保留原文；第三方模板若进一步改写总结、导致无法确认完整正文，也会保守停止隐藏并说明原因。此检查确认当前预览的注入，不保证用户之后修改预算、预设或其他世界书时仍能注入。

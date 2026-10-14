@@ -12,6 +12,95 @@ const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.me
 const markupSource = await readFile(new URL('../modules/settings-ui.js', import.meta.url), 'utf8');
 const stylesheet = await readFile(new URL('../style.css', import.meta.url), 'utf8');
 
+test('1.14–1.17 world list fallback refreshes before create and sees later lists', async () => {
+    const f = await fixture();
+    delete f.context.getWorldInfoNames;
+    let listed = false;
+    const save = f.context.saveWorldInfo;
+    f.context.saveWorldInfo = async (name, data) => { await save(name, data); listed = true; };
+    f.context.updateWorldInfoList = async () => {
+        f.sandbox.__fixtures.worldInfo.world_names = listed ? [f.api.state().settings.worldBookName] : [];
+    };
+    const book = await f.api.evaluate('ensureWorldBook()');
+    assert.ok(book.entries);
+    assert.equal(f.writes.length, 1);
+    await f.api.evaluate('ensureWorldBook()');
+    assert.equal(f.writes.length, 1, 'existing book must not be overwritten by an empty one');
+    f.sandbox.__fixtures.worldInfo.world_names = ['renamed'];
+    assert.deepEqual(Array.from(await f.api.evaluate('worldInfoNames(getContext())')), ['renamed']);
+});
+
+test('1.14 end-to-end save and hide requires both unmarked and entry-traced previews', async () => {
+    const f = await fixture();
+    f.api.evaluate('__fixtures.verifyInjection = verifySummaryInjection;');
+    f.prepareSummary();
+    f.api.evaluate('verifySummaryInjection = __fixtures.verifyInjection;');
+    delete f.context.eventTypes.WORLDINFO_SCAN_DONE;
+    f.context.eventTypes.WORLDINFO_ENTRIES_LOADED = 'entries-loaded';
+    let previews = 0;
+    f.context.generate = async (_type, _options, dryRun) => {
+        assert.equal(dryRun, true);
+        assert.equal(f.executed.length, 0);
+        const entry = { ...bookEntry(f), world: f.api.state().settings.worldBookName };
+        const original = structuredClone(entry);
+        const lore = { globalLore: [entry], chatLore: [], characterLore: [], personaLore: [] };
+        await f.context.eventSource.emit('entries-loaded', lore);
+        assert.deepEqual(entry, original);
+        f.api.onFinalPromptData({ prompt: lore.globalLore[0].content }, true);
+        previews++;
+    };
+    assert.equal(await f.api.runLargeSummary(), true);
+    assert.equal(previews, 2);
+    assert.deepEqual(f.executed, ['/hide 0-9']);
+    assert.ok(!JSON.stringify(f.writes).includes('MEWO_VERIFY_'));
+    assert.equal(f.handlers.get('entries-loaded').size, 0);
+});
+
+test('Tauri missing post-processing route gives actionable error and never silently uses raw preview', async () => {
+    const f = await fixture();
+    f.sandbox.__TAURITAVERN_HOST__ = { platform: 'android', kind: 'mobile' };
+    f.api.evaluate(`prepareChatPreview = async (_, messages) => ({ messages, chat_completion_source: 'custom', custom_prompt_post_processing: 'strict' });`);
+    let requests = 0;
+    f.sandbox.fetch = async url => {
+        assert.equal(url, '/api/backends/chat-completions/process');
+        requests++;
+        return new Response('{}', { status: 404 });
+    };
+    await assert.rejects(f.api.evaluate('processedPreview(getContext(), { prompt: [{role:"user",content:"source"}] })'), /TauriTavern.*后处理.*无/);
+    assert.equal(requests, 1);
+    assert.equal(f.executed.length, 0);
+    f.api.evaluate(`prepareChatPreview = async (_, messages) => ({ messages, chat_completion_source: 'custom', custom_prompt_post_processing: '' });`);
+    assert.equal((await f.api.evaluate('processedPreview(getContext(), { prompt: [{role:"user",content:"source"}] })'))[0].content, 'source');
+    assert.equal(requests, 1);
+});
+
+test('summary stream on an older WebView uses the existing host fetch bridge and restores it', async () => {
+    const f = await fixture();
+    f.prepareSummary({ nativeRequest: true });
+    f.sandbox.AbortSignal = {};
+    const originalFetch = f.sandbox.fetch;
+    let requests = 0;
+    const bridge = async (url, init) => {
+        if (!url.includes('/generate')) return originalFetch(url, init);
+        requests++;
+        assert.ok(init.signal);
+        return new Response('data: {"choices":[{"delta":{"content":"兼容总结"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } });
+    };
+    f.sandbox.fetch = bridge;
+    f.context.generate = async () => {
+        const payload = { type: 'quiet', messages: [{ role: 'user', content: '剧情' }] };
+        f.api.onMainApiRequest(payload);
+        const response = await f.sandbox.fetch('/api/backends/chat-completions/generate', {
+            body: JSON.stringify(payload), signal: new AbortController().signal,
+        });
+        return (await response.json()).choices[0].message.content;
+    };
+    assert.equal(await f.api.runLargeSummary(), true);
+    assert.equal(requests, 1);
+    assert.equal(f.sandbox.fetch, bridge);
+    assert.match(bookEntry(f).content, /兼容总结/);
+});
+
 const bookEntry = f => Object.values(f.writes.at(-1)?.data.entries ?? {}).find(entry =>
     entry.extensions?.auto_large_summary?.archiveId === f.api.evaluate('getContext().chatMetadata.auto_large_summary?.archiveId'));
 
@@ -76,6 +165,7 @@ async function fixture(savedSettings = {}) {
     const tokenRenders = [];
     const openai = { promptManager: { render: value => tokenRenders.push(value) } };
     const regex = { getRegexedString: text => context.stripSummaryForTest ? '' : text, regex_placement: { WORLD_INFO: 5 } };
+    const worldInfo = { world_names: [] };
     const sandbox = createContext({
         console: { ...console, error() {}, warn() {} }, structuredClone, setTimeout, clearTimeout, setInterval, clearInterval, URL, Response, AbortController, AbortSignal, TextDecoder,
         location: { origin: 'http://st.local' },
@@ -100,11 +190,13 @@ async function fixture(savedSettings = {}) {
             context: initialContext,
             book: () => structuredClone(storedBook),
             native,
+            worldInfo,
         },
     });
     const importHostModule = async specifier => {
-            assert.ok(['/script.js', '/scripts/openai.js', '/scripts/extensions/regex/engine.js'].includes(specifier), specifier);
-            const exports = specifier === '/script.js' ? native : specifier.includes('regex/') ? regex : openai;
+            assert.ok(['/script.js', '/scripts/openai.js', '/scripts/extensions/regex/engine.js', '/scripts/world-info.js'].includes(specifier), specifier);
+            const exports = specifier === '/script.js' ? native : specifier.includes('regex/') ? regex
+                : specifier === '/scripts/world-info.js' ? worldInfo : openai;
             const imported = new SyntheticModule(Object.keys(exports), function () {
                 for (const [key, value] of Object.entries(exports)) this.setExport(key, value);
             }, { context: sandbox });
