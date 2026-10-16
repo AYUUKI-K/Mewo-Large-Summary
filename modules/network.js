@@ -40,12 +40,30 @@ export function combineRequestSignals(signals) {
 export async function fetchJson(url, init = {}, options = {}) {
     return await withRequestSignal(async signal => {
         const response = await fetch(url, { ...init, signal });
-        if (!response.ok) {
-            const error = new Error(`${options.label ?? '请求失败'}（HTTP ${response.status}）。`);
+        // Report the requested path, never credentials, query parameters, the
+        // redirect destination or an arbitrary HTML/error response body.
+        const endpoint = String(url).replace(/^[a-z][a-z\d+.-]*:\/\/[^/]+/i, '').split(/[?#]/)[0];
+        const failure = (message, code) => {
+            const error = new Error(`${options.label ?? '请求失败'}（HTTP ${response.status}，${endpoint}）：${message}`);
             error.status = response.status;
-            throw error;
+            error.code = code;
+            return error;
+        };
+        if (!response.ok) {
+            throw failure('请检查酒馆服务、登录状态及反向代理配置。', 'HTTP_ERROR');
         }
         if (response.status === 204) return null;
-        return await response.json();
+        // Keep body reads inside the timeout and outside the parse catch so
+        // cancellation and interrupted connections retain their real errors.
+        const body = await response.text();
+        try { return JSON.parse(body); }
+        catch {
+            const html = /^\s*</.test(body) || /\btext\/html\b/i.test(response.headers?.get('content-type') ?? '');
+            throw failure(html
+                ? '接口返回了 HTML 页面，未返回 JSON 数据。可能是登录页、代理错误页或当前宿主不支持此接口；请检查登录状态、反向代理和宿主版本。'
+                : body.trim() ? '接口返回的数据不是有效 JSON，请检查酒馆后台或代理日志。'
+                    : '接口返回了空响应，请检查酒馆后台或代理日志。',
+            html ? 'HTML_RESPONSE' : 'INVALID_JSON_RESPONSE');
+        }
     }, { signal: init.signal, ...options });
 }

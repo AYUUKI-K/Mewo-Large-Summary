@@ -33,6 +33,7 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     let drag = null;
     let frame = saved.frame ?? null;
     let launcherPosition = saved.launcherPosition ?? null;
+    let dockInView = false;
     let saveTimer;
     const lifecycle = new AbortController();
     const options = { signal: lifecycle.signal };
@@ -69,7 +70,9 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     const opener = root.querySelector('.als-open-floating');
     const visibilityToggle = root.querySelector('.als-floating-visible');
     const syncVisibility = () => {
-        shell.hidden = open || !visible;
+        // Temporary phone avoidance is separate from the user's display and
+        // position preferences. The launcher returns when the panel leaves view.
+        shell.hidden = open || !visible || (viewport().width <= 600 && dockInView);
         if (visibilityToggle) visibilityToggle.checked = visible;
     };
     const focusHome = () => {
@@ -93,7 +96,7 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
         Object.assign(root.style, { left: frame.x + 'px', top: frame.y + 'px', width: frame.width + 'px', height: frame.height + 'px' });
     };
     const applyLauncherPosition = next => {
-        if (open || !visible) return;
+        if (shell.hidden) return;
         launcherPosition = clampLauncherPosition(next, shell.getBoundingClientRect(), viewport());
         Object.assign(shell.style, { left: launcherPosition.x + 'px', top: launcherPosition.y + 'px', right: 'auto', bottom: 'auto' });
     };
@@ -118,7 +121,7 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
         if (launcherPosition) applyLauncherPosition(launcherPosition);
         launcher.setAttribute('aria-expanded', 'false');
         persist(true);
-        if (focusDock || !visible) focusHome();
+        if (focusDock || shell.hidden) focusHome();
         else launcher.focus();
     };
     const setVisible = value => {
@@ -217,6 +220,7 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     on(launcher, 'click', () => show());
     const resize = () => {
         stopDrag();
+        syncVisibility();
         if (open) applyFrame(frame);
         else if (launcherPosition) applyLauncherPosition(launcherPosition);
         persist();
@@ -233,6 +237,12 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     });
     observer.observe(root);
     observer.observe(shell);
+    const dockObserver = new IntersectionObserver(entries => {
+        dockInView = entries.some(entry => entry.isIntersecting && entry.intersectionRect.height > 0);
+        syncVisibility();
+        if (launcherPosition) applyLauncherPosition(launcherPosition);
+    });
+    dockObserver.observe(root.querySelector('.inline-drawer-content'));
     syncVisibility();
     if (launcherPosition) applyLauncherPosition(launcherPosition);
     const controller = {
@@ -262,6 +272,7 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
             close({ focusDock: true });
             lifecycle.abort();
             observer.disconnect();
+            dockObserver.disconnect();
             clearTimeout(saveTimer);
             shell.remove();
             header.remove();

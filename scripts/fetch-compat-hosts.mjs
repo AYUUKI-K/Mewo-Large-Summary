@@ -14,7 +14,8 @@ for (const [name, repo, commit] of hosts) {
     const files = ['script.js', 'scripts/st-context.js', 'scripts/events.js', 'scripts/openai.js',
         'scripts/tokenizers.js', 'scripts/world-info.js', 'scripts/extensions/regex/engine.js', 'scripts/extensions.js']
         .map(file => `${tauri ? 'src' : 'public'}/${file}`);
-    files.push(...(tauri ? ['src/tauri/main/routes/ai-routes.js', 'src/scripts/util/safe-generate.js']
+    files.push(...(tauri ? ['src/tauri/main/routes/ai-routes.js', 'src/scripts/util/safe-generate.js',
+        'src-tauri/crates/tt-application/src/services/chat_completion_service/payload/prompt_post_processing.rs']
         : ['src/endpoints/backends/chat-completions.js']));
     for (const file of files) {
         let response;

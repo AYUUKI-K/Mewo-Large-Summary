@@ -42,21 +42,25 @@ export function settingsMarkup(version) {
               <div class="als-token-line"><span><small>最近计数</small><strong class="als-token-count">—</strong><small>token</small></span><button type="button" class="als-icon-button als-refresh-context" aria-label="重新计算上下文 token" title="重新计算上下文 token">${uiIcon('refresh')}</button></div><p class="als-token-threshold als-help"></p>
               <div class="als-scope">
                 <div class="als-scope-heading"><span>总结当前上下文，保留最近原文</span><button type="button" class="als-text-button als-go-settings">调整</button></div>
-                <div class="als-range-ribbon" aria-hidden="true"><span class="als-range-old"></span><span class="als-range-recent"></span></div>
-                <div class="als-range-labels"><div><span class="als-range-key"><i></i>总结后隐藏</span><strong class="als-hide-count">—</strong><small class="als-hide-range"></small></div><div><span class="als-range-key als-range-key-recent"><i></i>保留原文</span><strong class="als-keep-count">—</strong><small class="als-keep-range"></small></div></div>
+                <div class="als-range-ribbon" aria-hidden="true"><span class="als-range-hidden"></span><span class="als-range-old"></span><span class="als-range-recent"></span></div>
+                <div class="als-range-labels"><div><span class="als-range-key als-range-key-hidden"><i></i>已经隐藏</span><strong class="als-hidden-count">—</strong><small>当前实际状态</small></div><div><span class="als-range-key"><i></i>还将隐藏</span><strong class="als-hide-count">—</strong><small class="als-hide-range"></small></div><div><span class="als-range-key als-range-key-recent"><i></i>继续保留</span><strong class="als-keep-count">—</strong><small class="als-keep-range"></small></div></div>
               </div>
               <div class="als-runtime"><span class="als-runtime-style"></span><span class="als-runtime-mode"></span><span class="als-runtime-api"></span></div>
+              <p class="als-auto-status als-help" role="status"></p>
               <p class="als-action-context als-muted"></p>
+              <button type="button" class="menu_button als-primary als-next-action" hidden></button>
               <button type="button" class="menu_button als-primary als-run"><span>立即总结并隐藏旧消息</span>${uiIcon('arrow')}</button>
               <button type="button" class="menu_button als-compact">仅合并已有总结</button>
               <p class="als-action-hint als-muted">仅合并只整理已有总结，不改变消息可见状态。</p>
+              <p class="als-help als-source-warning" role="status" hidden>记忆待更新：总结之后修改、删除或切换了已覆盖原文。重建成功前旧总结继续保留；自动总结已暂停。</p>
               <button type="button" class="menu_button als-rebuild" hidden>从分支原文重建（含隐藏消息）</button>
             </section>
-            <section class="als-last-section"><div class="als-section-heading"><h4>最近一次记忆</h4><button type="button" class="als-text-button als-view-current">查看正文 ${uiIcon('arrow')}</button></div><p class="als-last-operation als-muted">当前存档暂无总结。</p></section>
-            <details class="als-incomplete-result als-disclosure" hidden><summary>未完成的总结结果 · 本页暂存</summary><div class="als-disclosure-body"><p class="als-incomplete-reason als-help"></p><p class="als-help">此结果未写入世界书，也未触发隐藏。刷新页面会清除暂存，请按需复制。</p><textarea class="text_pole als-incomplete-text" rows="8" readonly aria-label="未完成的总结正文"></textarea><button type="button" class="menu_button als-incomplete-copy">复制未完成结果</button></div></details>
+            <section class="als-last-section"><div class="als-section-heading"><h4>最近一次记忆</h4><button type="button" class="als-text-button als-view-current">查看正文 ${uiIcon('arrow')}</button></div><p class="als-summary-result" role="status"></p><p class="als-token-comparison als-help"></p><p class="als-last-operation als-muted">当前存档暂无总结。</p></section>
+            <details class="als-incomplete-result als-disclosure" hidden><summary>未完成的总结草稿</summary><div class="als-disclosure-body"><p class="als-incomplete-reason als-help"></p><p class="als-draft-state als-help" role="status"></p><textarea class="text_pole als-incomplete-text" rows="8" readonly aria-label="未完成的总结正文"></textarea><div class="als-actions"><button type="button" class="menu_button als-incomplete-copy">复制未完成结果</button><button type="button" class="menu_button als-incomplete-download">下载未完成正文</button><button type="button" class="menu_button als-incomplete-retry" hidden>重试本地存储</button><button type="button" class="als-text-button als-incomplete-delete">删除这份草稿</button></div></div></details>
             <details class="als-recovery als-disclosure"><summary>${uiIcon('undo')}<span>恢复与撤销</span><span class="als-disclosure-note">最近一次操作</span></summary>
-              <p class="als-help">恢复原文与撤销总结可以分别进行。</p>
+              <p class="als-help">一键退回本次整理前的记忆与原文，也可以分别处理。此前隐藏的消息保持原样。</p>
               <div class="als-recovery-actions">
+                <div><button type="button" class="menu_button als-undo-restore" disabled>撤销本次整理并恢复原文</button><small>本次总结保留在历史中，不重新调用模型。</small></div>
                 <div><button type="button" class="menu_button als-retry-hide" disabled>只重试隐藏</button><small>总结已保存，直接完成隐藏，不再调用模型。</small></div>
                 <div><button type="button" class="menu_button als-restore" disabled>恢复本轮隐藏的消息</button><small>仅恢复本轮改变的消息，原先隐藏的保持原样。</small></div>
                 <div><button type="button" class="menu_button als-undo" disabled>撤销最近一次总结</button><small>恢复之前的注入正文，本次输出保留在历史中。</small></div>
@@ -71,6 +75,7 @@ export function settingsMarkup(version) {
               <label class="als-switch als-switch-row"><span><strong>自动总结</strong><small>达到阈值时自动整理；关闭后仍可手动总结。</small></span><input class="als-auto-enabled" type="checkbox" aria-label="自动总结"><span class="als-switch-track" aria-hidden="true"></span></label>
               <div class="als-grid"><label class="als-field">触发 token 数<input class="text_pole als-threshold" type="number" min="1" step="1000"></label><label class="als-field">保留最近消息条数<input class="text_pole als-keep" type="number" min="1" step="1"></label></div>
               <small class="als-keep-help als-help">20 条消息通常约为 10 轮问答；保留数量只决定隐藏边界。</small>
+              <p class="als-help als-budget-warning" role="status" hidden></p>
             </section>
             <section class="als-form-section"><h4>总结方式</h4>
               <div class="als-grid"><label class="als-field">提示词风格<select class="text_pole als-style als-settings-style"><option value="traditional">传统详述</option><option value="memory">结构记忆</option></select></label><label class="als-field">运行模式<select class="text_pole als-mode als-settings-mode"><option value="incremental">多次大总结</option><option value="merged">合并大总结</option></select></label></div>
@@ -103,11 +108,12 @@ export function settingsMarkup(version) {
 
           <div class="als-panel" id="als-panel-prompt" data-panel="prompt" role="tabpanel" aria-labelledby="als-tab-prompt" hidden>
             <div class="als-page-heading"><h3>决定哪些细节值得留下</h3><p>两套风格各有新增、合并模板，分别保存，支持酒馆宏。</p></div>
+            <div class="als-running-template"><span class="als-eyebrow">实际运行模板</span><strong class="als-running-template-name"></strong><button type="button" class="als-text-button als-edit-running">编辑当前运行模板</button></div>
             <div class="als-grid"><label class="als-field">编辑风格<select class="text_pole als-style als-prompt-style"><option value="traditional">传统详述</option><option value="memory">结构记忆</option></select></label><label class="als-field">编辑模式<select class="text_pole als-mode als-prompt-mode"><option value="incremental">多次大总结</option><option value="merged">合并大总结</option></select></label></div>
-            <p class="als-prompt-context als-help"></p>
+            <p class="als-prompt-context als-help"></p><small class="als-prompt-usage" role="status"></small>
             <label class="als-prompt-label"><span class="als-editor-heading">总结指令 <span class="als-prompt-length"></span></span><textarea class="text_pole als-prompt" rows="15" spellcheck="false" aria-label="大总结提示词"></textarea></label>
-            <details class="als-disclosure als-prompt-help"><summary><span>编辑提示</span></summary><p class="als-help">传统详述沿用事件与角色表，结构记忆按六类信息整理。{{user}} 等宏会在发送时展开。此处切换只改变编辑对象；实际运行风格和模式在设置页选择并保存。恢复默认只影响正在编辑的一份模板，保存后生效。</p><button type="button" class="als-text-button als-prompt-reset">回到默认提示词</button></details>
-            <div class="als-savebar"><small class="als-prompt-state" role="status">提示词已保存</small><div class="als-save-actions"><button type="button" class="menu_button als-prompt-discard">撤回修改</button><button type="button" class="menu_button als-primary als-prompt-save">保存修改提示词</button></div></div>
+            <details class="als-disclosure als-prompt-help"><summary><span>编辑提示</span></summary><p class="als-help">传统详述沿用事件与角色表，结构记忆按六类信息整理。{{user}} 等宏会在发送时展开。此处切换只改变编辑对象；“保存并使用此模板”会同时启用对应风格和模式。普通保存仅更新模板；两种保存都保留其他草稿。恢复默认只影响正在编辑的一份模板，保存后生效。</p><button type="button" class="als-text-button als-prompt-reset">回到默认提示词</button></details>
+            <div class="als-savebar"><small class="als-prompt-state" role="status">提示词已保存</small><div class="als-save-actions"><button type="button" class="menu_button als-prompt-discard">撤回修改</button><button type="button" class="menu_button als-prompt-save">仅保存模板</button><button type="button" class="menu_button als-primary als-prompt-use">保存并使用此模板</button></div></div>
           </div>
 
           <div class="als-panel" id="als-panel-directory" data-panel="directory" role="tabpanel" aria-labelledby="als-tab-directory" hidden>
@@ -118,7 +124,7 @@ export function settingsMarkup(version) {
               <div class="als-tree"></div><div class="als-pagination"><button type="button" class="menu_button als-page-prev">上一页</button><span class="als-page-label">1 / 1</span><button type="button" class="menu_button als-page-next">下一页</button></div>
             </div>
             <div class="als-preview-box" hidden>
-              <div class="als-reader-toolbar"><button type="button" class="als-text-button als-preview-close">${uiIcon('back')} 返回记录</button><button type="button" class="als-icon-button als-copy-summary" aria-label="复制总结原文" title="复制总结原文">${uiIcon('copy')}</button></div>
+              <div class="als-reader-toolbar"><button type="button" class="als-text-button als-preview-close">${uiIcon('back')} 返回记录</button><div class="als-actions"><button type="button" class="als-text-button als-download-summary">下载原文</button><button type="button" class="als-icon-button als-copy-summary" aria-label="复制总结原文" title="复制总结原文">${uiIcon('copy')}</button></div></div>
               <h3 class="als-preview-title"></h3>
               <label class="als-field">查看内容<select class="text_pole als-history-select" aria-label="选择总结轮次"></select></label>
               <div class="als-reader-views" role="group" aria-label="总结显示方式"><button type="button" class="als-reader-mode" data-view="reading" aria-pressed="true">阅读</button><button type="button" class="als-reader-mode" data-view="source" aria-pressed="false">原文</button></div>

@@ -35,16 +35,17 @@ const eventSource = {
  on(event, fn) { if(!handlers.has(event)) handlers.set(event, new Set()); handlers.get(event).add(fn); },
  removeListener(event, fn) { handlers.get(event)?.delete(fn); },
  makeLast(event, fn) { this.removeListener(event, fn); this.on(event, fn); },
+ makeFirst(event, fn) { this.removeListener(event, fn); handlers.set(event,new Set([fn,...(handlers.get(event) ?? [])])); },
  async emit(event, ...args) { for(const fn of [...(handlers.get(event) ?? [])]) await fn(...args); }
 };
-const eventTypes=Object.fromEntries(['APP_READY','SETTINGS_UPDATED','GENERATION_STARTED','GENERATION_AFTER_COMMANDS','GENERATE_AFTER_DATA','CHAT_COMPLETION_SETTINGS_READY','WORLDINFO_SCAN_DONE','MESSAGE_RECEIVED','MESSAGE_SENT','MESSAGE_DELETED','MESSAGE_UPDATED','MESSAGE_SWIPED','GENERATION_ENDED','CHAT_CHANGED','CHAT_CREATED'].map(x=>[x,x]));
+const eventTypes=Object.fromEntries(['APP_READY','SETTINGS_UPDATED','GENERATION_STARTED','GENERATION_AFTER_COMMANDS','GENERATE_AFTER_DATA','CHAT_COMPLETION_PROMPT_READY','CHAT_COMPLETION_SETTINGS_READY','WORLDINFO_SCAN_DONE','MESSAGE_RECEIVED','MESSAGE_SENT','MESSAGE_DELETED','MESSAGE_UPDATED','MESSAGE_SWIPED','GENERATION_ENDED','CHAT_CHANGED','CHAT_CREATED'].map(x=>[x,x]));
 if(legacy){delete eventTypes.WORLDINFO_SCAN_DONE;eventTypes.WORLDINFO_ENTRIES_LOADED='WORLDINFO_ENTRIES_LOADED';}
 const saved=JSON.parse(localStorage.getItem('mewo-smoke-state') || 'null');
 const context={
  chatId:saved?.chatId ?? 'smoke-chat',characterId:0,characters:[{name:'测试角色',avatar:'smoke.png',chat:'smoke-chat'}],groupId:null,
  chat:saved?.chat ?? Array.from({length:100},(_,i)=>({mes:'第 '+i+' 层的测试剧情和人物约定。',name:i%2?'测试角色':'用户',is_user:!(i%2),is_system:false})),
  chatMetadata:saved?.metadata ?? {integrity:'smoke-integrity'},extensionSettings:saved?.settings ?? {auto_large_summary:{enabled:true,autoEnabled:false}},
- eventSource,eventTypes,mainApi:'openai',chatCompletionSettings:{openai_max_tokens:8192,chat_completion_source:'custom'},powerUserSettings:{},name1:'用户',name2:'测试角色',
+ eventSource,eventTypes,mainApi:'openai',chatCompletionSettings:{openai_max_context:128000,openai_max_tokens:8192,chat_completion_source:'custom'},powerUserSettings:{},name1:'用户',name2:'测试角色',
  getRequestHeaders:()=>({'Content-Type':'application/json'}),getCurrentChatId:()=>context.chatId,
  async saveMetadata(){persist()},saveMetadataDebounced(){persist()},saveSettingsDebounced(){},
  async updateWorldInfoList(){const names=await (await fetch('/fixture/books')).json(); context.worldNames=names;if(legacy)(await import('/scripts/world-info.js')).setNames(names);const select=document.querySelector('#world_info');const old=[...select.selectedOptions].map(o=>o.value);select.replaceChildren(...names.map(n=>{const o=new Option(n,n);o.selected=old.includes(n);return o}));},
@@ -56,8 +57,9 @@ const context={
  async generate(type,options={},dryRun=false){
   await eventSource.emit(eventTypes.GENERATION_STARTED,type,options,dryRun);
   await eventSource.emit(eventTypes.GENERATION_AFTER_COMMANDS,type,options,dryRun);
-  if(!dryRun){let aborted=false;window.meowLargeSummaryGenerationInterceptor([],100000,()=>{aborted=true},type);if(aborted)return '';}
-  const messages=context.chat.filter(m=>!m.is_system).map(m=>({role:m.is_user?'user':'assistant',content:m.mes}));
+  const core=context.chat.filter(m=>!m.is_system).map((m,index)=>({...m,index}));
+  if(!dryRun){let aborted=false;window.meowLargeSummaryGenerationInterceptor(core,100000,()=>{aborted=true},type);if(aborted)return '';}
+  const messages=core.slice(window.smoke.trimSource?90:0).map(m=>({role:m.is_user?'user':'assistant',content:m.mes}));
   const {books}=await (await fetch('/fixture/metrics')).json();
   const entries=new Map();
   const lore={globalLore:[],characterLore:[],chatLore:[],personaLore:[]};
@@ -73,6 +75,7 @@ const context={
    messages.unshift({role:'system',content:entry.content});
   }
   if(eventTypes.WORLDINFO_SCAN_DONE)await eventSource.emit(eventTypes.WORLDINFO_SCAN_DONE,{activated:{entries}});
+  await eventSource.emit(eventTypes.CHAT_COMPLETION_PROMPT_READY,{chat:messages,dryRun});
   await eventSource.emit(eventTypes.GENERATE_AFTER_DATA,{prompt:messages},dryRun);
   if(dryRun)return;
   const data={type,messages,model:'fixture',stream:false,fixtureTruncated:window.smoke.truncated};
@@ -91,10 +94,13 @@ window.SillyTavern={getContext:()=>context,libs:{DOMPurify:window.DOMPurify,show
 window.toastr=Object.fromEntries(['info','success','warning','error'].map(kind=>[kind,(text)=>{document.querySelector('#notice').textContent=text;return{text}}]));window.toastr.clear=()=>{};
 document.querySelector('#theme').onclick=()=>document.body.classList.toggle('light');
 document.querySelector('#fixture-hide').onchange=event=>{window.smoke.failHide=event.target.checked};
-for(const [key,label] of [['failBudget','模拟世界书预算不足'],['truncated','模拟模型回复截断']]){
+for(const [key,label] of [['failBudget','模拟世界书预算不足'],['truncated','模拟模型回复截断'],['trimSource','模拟上下文裁剪']]){
  const row=document.createElement('label'),input=document.createElement('input');input.type='checkbox';input.id='fixture-'+key;
  input.onchange=()=>{window.smoke[key]=input.checked};row.append(input,document.createTextNode(label));document.querySelector('#fixture-controls').append(row);
 }
+const editOld=document.createElement('button');editOld.id='fixture-edit-old';editOld.textContent='修改已总结的旧剧情';
+editOld.onclick=async()=>{context.chat[0].mes+='旧剧情已纠正。';persist();await eventSource.emit(eventTypes.MESSAGE_UPDATED,0);};
+document.querySelector('#fixture-controls').append(editOld);
 document.querySelector('#fixture-new').onclick=async()=>{
  context.chatId='林间驿站 · '+Date.now().toString().slice(-5);
  context.chat=Array.from({length:100},(_,i)=>({mes:'第 '+i+' 层的测试剧情和人物约定。',name:i%2?'测试角色':'用户',is_user:!(i%2),is_system:false}));

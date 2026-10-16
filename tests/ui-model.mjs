@@ -4,6 +4,49 @@ import assert from 'node:assert/strict';
 import { clampPanelFrame, clampLauncherPosition } from '../modules/floating-panel.js';
 import { renderSummaryReader } from '../modules/summary-reader.js';
 import { buildSummaryMessages, buildSummaryTextPrompt, SUMMARY_TASK_INSTRUCTION } from '../modules/summary-prompt.js';
+import { summaryResultText, automaticStatus, tokenComparisonText } from '../modules/summary-model.js';
+import { textExportFilename } from '../modules/text-export.js';
+
+test('automatic status explains each pause without hiding manual mode or a higher priority repair', () => {
+    const settings = { enabled: true, autoEnabled: true, threshold: 60000 };
+    const info = { hasChat: true, busy: false, hasWork: true, chatLength: 30 };
+    for (const [archive, journal, label] of [
+        [{ sourceChanged: true }, null, '记忆待更新'], [{ branch: { needsRebuild: true } }, null, '等待重建'],
+        [{ pendingSummarySave: true }, null, '等待保存确认'], [{}, { phase: 'saved' }, '等待隐藏'],
+        [{ coverageBlocked: true }, null, '输入检查未通过'], [{ undoAtLength: 30 }, null, '等待新消息'],
+        [{ summaryStillOverThreshold: true }, null, '自动已暂停'], [{}, { combinedRestorePending: true }, '等待恢复原文'],
+    ]) assert.equal(automaticStatus(settings, archive, journal, info).label, label);
+    assert.equal(automaticStatus({ ...settings, autoEnabled: false }, {}, null, info).label, '手动模式');
+    assert.equal(automaticStatus(settings, {}, null, { ...info, hasWork: false }).label, '等待新消息');
+    assert.equal(automaticStatus(settings, {}, null, { ...info, busy: true }).label, '处理中');
+    assert.equal(automaticStatus({ ...settings, enabled: false }, { sourceChanged: true }, null, info).label, '已停用');
+});
+
+test('token comparison omits unknown, other-operation and reverted results and reports increases honestly', () => {
+    const journal = { id: 'one', phase: 'complete' };
+    assert.equal(tokenComparisonText({ operationId: 'two', before: 60000, after: 10000 }, journal), '');
+    assert.equal(tokenComparisonText({ operationId: 'one', after: 10000 }, journal), '整理后 10,000 token');
+    assert.match(tokenComparisonText({ operationId: 'one', before: 60000, after: 10000 }, journal), /减少 50,000/);
+    assert.match(tokenComparisonText({ operationId: 'one', before: 60000, after: 61000 }, journal), /增加 1,000/);
+    assert.match(tokenComparisonText({ operationId: 'one', before: 0, after: 0 }, journal), /数量未变/);
+    assert.equal(tokenComparisonText({ operationId: 'one', after: 0 }, { ...journal, messagesRestored: true }), '');
+    assert.equal(tokenComparisonText({ operationId: 'one', after: 0 }, { ...journal, phase: 'undone' }), '');
+});
+
+test('download filenames preserve Chinese while preventing path separators and invalid filename characters', () => {
+    assert.equal(textExportFilename('角色/档案:一*?'), '喵喵-角色_档案_一__.txt');
+    assert.equal(textExportFilename(''), '喵喵-总结.txt');
+    assert.ok(textExportFilename('字'.repeat(500)).length < 120);
+});
+
+test('legacy result counts and missing token counts are omitted instead of presented as zero', () => {
+    assert.equal(summaryResultText(null), '');
+    const legacy = { operation: 'summary', phase: 'complete' };
+    assert.doesNotMatch(summaryResultText(legacy), /0|token|新隐藏/);
+    assert.match(summaryResultText(legacy, 0), /0 token/);
+    assert.doesNotMatch(summaryResultText({ ...legacy, phase: 'saved' }), /隐藏已完成/);
+    assert.equal(summaryResultText({ ...legacy, phase: 'undone' }), '');
+});
 
 test('summary tasks demote roleplay instructions to source data without losing assembled facts', () => {
     const source = [
