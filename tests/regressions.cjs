@@ -95,7 +95,7 @@ function fixture({ books = {}, active = [], characterId = '0', saveFails = false
             assert.equal(request.headers['X-CSRF-TOKEN'], 'fixture');
             calls.rawRead++;
             const { name } = JSON.parse(request.body);
-            return { ok: readStatus === 200, status: readStatus, json: async () => clone(files.get(name) ?? { entries: {} }) };
+            return Response.json(files.get(name) ?? { entries: {} }, { status: readStatus });
         },
     });
     vm.runInContext(source, sandbox, { filename: 'index.js' });
@@ -147,7 +147,7 @@ test('creates an absent worldbook even when ST has already cached a dummy', asyn
     assert.equal(f.files.has('大总结世界书'), false);
     const book = await f.sandbox.ensureWorldBook();
     assert.equal(f.files.has('大总结世界书'), true);
-    assert.deepEqual(book.entries, {});
+    assert.deepEqual(clone(book.entries), {});
     assert.equal(f.calls.save, 1);
     assert.equal(f.calls.cachedLoad, 1);
     assert.equal(f.calls.rawRead, 1);
@@ -158,7 +158,7 @@ test('preserves existing worldbook entries and bypasses a stale client dummy', a
     const f = fixture({ books: { '大总结世界书': original } });
     f.cache.set('大总结世界书', { entries: {} });
     const book = await f.sandbox.ensureWorldBook();
-    assert.deepEqual(book, original);
+    assert.deepEqual(clone(book), original);
     assert.deepEqual(f.files.get('大总结世界书'), original);
     assert.equal(f.calls.save, 0);
 });

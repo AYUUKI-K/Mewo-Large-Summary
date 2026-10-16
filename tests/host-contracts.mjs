@@ -3,6 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, access } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 
 const root = new URL('../output/hosts/', import.meta.url);
 for (const version of ['1.14.0', '1.15.0', '1.16.0', '1.17.0', '1.18.0', 'tauri-canary']) {
@@ -31,6 +32,12 @@ for (const version of ['1.14.0', '1.15.0', '1.16.0', '1.17.0', '1.18.0', 'tauri-
         assert.match(script, /eventSource.emit\(event_types.GENERATE_AFTER_DATA, generate_data, dryRun\)/);
         assert.match(openai, /export function getChatCompletionModel\(/);
         assert.match(openai, /eventSource.emit\(event_types.CHAT_COMPLETION_SETTINGS_READY, generate_data\)/);
+        assert.match(events, /CHAT_COMPLETION_PROMPT_READY:/);
+        assert.match(openai, /eventSource.emit\(event_types.CHAT_COMPLETION_PROMPT_READY, eventData\)/);
+        assert.match(openai, /const eventData = \{ chat, dryRun \}/);
+        assert.match(script, /\.\.\.chatItem,\s*mes: regexedMessage,\s*index,/);
+        assert.match(script, /runGenerationInterceptors\(coreChat, this_max_context, type\)/);
+        assert.match(script, /(?:export function getMaxPromptTokens|export function getMaxContextSize)/);
         assert.match(tokenizer, /export async function countTokensOpenAIAsync\(/);
         assert.match(regex, /export function getRegexedString\(/);
         assert.match(world, /export (?:let|var) world_names/);
@@ -50,6 +57,10 @@ for (const version of ['1.14.0', '1.15.0', '1.16.0', '1.17.0', '1.18.0', 'tauri-
             assert.match(openai, /export async function createGenerationParameters\(/);
         }
         if (tauri) {
+            const processing = (await read('src-tauri/crates/tt-application/src/services/chat_completion_service/payload/prompt_post_processing.rs')).replace(/\r\n/g, '\n');
+            const bytes = Buffer.from(processing);
+            assert.equal(createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex'),
+                '53edbf77bf9d1a3ef2d836b4267711cd36df4c3b', 'TT local preview must be reviewed against any changed backend implementation');
             const routes = await read('src/tauri/main/routes/ai-routes.js');
             assert.match(routes, /\/api\/backends\/chat-completions\/generate/);
             assert.match(routes, /\/api\/backends\/chat-completions\/status/);

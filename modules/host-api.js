@@ -4,6 +4,21 @@ export async function chatCompletionApi() { return await import('/scripts/openai
 export async function tokenizerApi() { return await import('/scripts/tokenizers.js'); }
 export async function regexApi() { return await import('/scripts/extensions/regex/engine.js'); }
 
+export async function inputTokenBudget(context) {
+    const native = await nativeScript();
+    const read = native.getMaxPromptTokens ?? native.getMaxContextSize;
+    if (typeof read === 'function') {
+        const budget = Number(read());
+        return Number.isFinite(budget) && budget > 0 ? budget : null;
+    }
+    if (context.mainApi === 'openai') {
+        const budget = Number(context.chatCompletionSettings?.openai_max_context)
+            - Number(context.chatCompletionSettings?.openai_max_tokens);
+        return Number.isFinite(budget) && budget > 0 ? budget : null;
+    }
+    return null;
+}
+
 export async function worldInfoNames(context) {
     if (typeof context.getWorldInfoNames === 'function') return context.getWorldInfoNames();
     // ST 1.14–1.17 expose the live list from world-info, but not from context.
