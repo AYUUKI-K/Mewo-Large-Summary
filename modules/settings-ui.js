@@ -94,6 +94,7 @@ export function settingsMarkup(version) {
             </section>
             <section class="als-form-section"><h4>界面</h4>
               <label class="als-switch als-switch-row"><span><strong>显示悬浮入口</strong><small>立即生效，记住当前浏览器的选择。关闭后仍可从扩展面板打开。</small></span><input class="als-floating-visible" type="checkbox" aria-label="显示悬浮入口"><span class="als-switch-track" aria-hidden="true"></span></label>
+              <label class="als-switch als-switch-row"><span><strong>靠边自动精简</strong><small>拖到左右边缘松手后，只显示最近 token 计数；点击展开，拖离恢复。立即生效，记住当前浏览器的选择。</small></span><input class="als-floating-compact" type="checkbox" aria-label="靠边自动精简"><span class="als-switch-track" aria-hidden="true"></span></label>
             </section>
             <details class="als-disclosure als-advanced"><summary>${uiIcon('tune')}<span>世界书与指令位置</span><span class="als-disclosure-note">高级设置</span></summary><div class="als-disclosure-body">
               <label class="als-field">世界书名称<input class="text_pole als-book" type="text" maxlength="80"></label>

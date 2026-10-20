@@ -24,6 +24,26 @@ export function clampLauncherPosition(position = {}, size, viewport) {
     };
 }
 
+export function launcherDockSide(position, size, viewport) {
+    const left = position.x - 12;
+    const right = viewport.width - size.width - 12 - position.x;
+    if (Math.min(left, right) > 24) return null;
+    return left <= right ? 'left' : 'right';
+}
+
+export function dockedLauncherPosition(side, fraction, size, viewport) {
+    const travel = Math.max(0, viewport.height - size.height - 24);
+    return clampLauncherPosition({
+        x: side === 'left' ? 12 : viewport.width - size.width - 12,
+        y: 12 + Math.max(0, Math.min(1, finite(fraction, .5))) * travel,
+    }, size, viewport);
+}
+
+export function launcherTokenText(tokens) {
+    if (!Number.isFinite(tokens)) return '—';
+    return tokens >= 1000 ? (tokens / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(tokens);
+}
+
 export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     if (mounted.has(root)) return mounted.get(root);
     let saved = {};
@@ -33,6 +53,9 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     let drag = null;
     let frame = saved.frame ?? null;
     let launcherPosition = saved.launcherPosition ?? null;
+    let autoCompact = saved.autoCompact !== false;
+    let dockSide = autoCompact && ['left', 'right'].includes(saved.dockSide) ? saved.dockSide : null;
+    let dockY = finite(saved.dockY, .5);
     let dockInView = false;
     let saveTimer;
     const lifecycle = new AbortController();
@@ -69,11 +92,14 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     const handle = header.querySelector('.als-floating-grip');
     const opener = root.querySelector('.als-open-floating');
     const visibilityToggle = root.querySelector('.als-floating-visible');
+    const compactToggle = root.querySelector('.als-floating-compact');
     const syncVisibility = () => {
         // Temporary phone avoidance is separate from the user's display and
         // position preferences. The launcher returns when the panel leaves view.
         shell.hidden = open || !visible || (viewport().width <= 600 && dockInView);
         if (visibilityToggle) visibilityToggle.checked = visible;
+        if (compactToggle) compactToggle.checked = autoCompact;
+        shell.dataset.dock = dockSide ?? '';
     };
     const focusHome = () => {
         if (opener?.getClientRects().length) { opener.focus(); return; }
@@ -86,7 +112,7 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     const persist = (immediate = false) => {
         clearTimeout(saveTimer);
         const write = () => {
-            try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ open, visible, frame, launcherPosition })); } catch { /* Private mode can reject writes. */ }
+            try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ open, visible, frame, launcherPosition, autoCompact, dockSide, dockY })); } catch { /* Private mode can reject writes. */ }
         };
         if (immediate) write();
         else saveTimer = setTimeout(write, 120);
@@ -95,10 +121,24 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
         frame = clampPanelFrame(next, viewport());
         Object.assign(root.style, { left: frame.x + 'px', top: frame.y + 'px', width: frame.width + 'px', height: frame.height + 'px' });
     };
-    const applyLauncherPosition = next => {
+    const applyLauncherPosition = (next, free = false) => {
         if (shell.hidden) return;
-        launcherPosition = clampLauncherPosition(next, shell.getBoundingClientRect(), viewport());
+        const size = shell.getBoundingClientRect();
+        launcherPosition = dockSide && !free && drag?.target !== launcher
+            ? dockedLauncherPosition(dockSide, dockY, size, viewport())
+            : clampLauncherPosition(next, size, viewport());
         Object.assign(shell.style, { left: launcherPosition.x + 'px', top: launcherPosition.y + 'px', right: 'auto', bottom: 'auto' });
+    };
+    const finishLauncherMovement = key => {
+        const rect = shell.getBoundingClientRect();
+        const candidate = launcherDockSide(rect, rect, viewport());
+        const inward = (candidate === 'left' && key === 'ArrowRight') || (candidate === 'right' && key === 'ArrowLeft');
+        const freeVertical = !dockSide && (key === 'ArrowUp' || key === 'ArrowDown');
+        dockSide = autoCompact && !inward && !freeVertical ? candidate : null;
+        syncVisibility();
+        const size = shell.getBoundingClientRect();
+        dockY = Math.max(0, Math.min(1, (rect.y - 12) / Math.max(1, viewport().height - size.height - 24)));
+        applyLauncherPosition(rect);
     };
     const stopDrag = () => {
         const current = drag;
@@ -118,7 +158,7 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
         home.after(root);
         home.hidden = true;
         syncVisibility();
-        if (launcherPosition) applyLauncherPosition(launcherPosition);
+        if (launcherPosition || dockSide) applyLauncherPosition(launcherPosition);
         launcher.setAttribute('aria-expanded', 'false');
         persist(true);
         if (focusDock || shell.hidden) focusHome();
@@ -128,7 +168,7 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
         visible = Boolean(value);
         if (!visible && open) close({ focusDock: true });
         syncVisibility();
-        if (visible && launcherPosition) applyLauncherPosition(launcherPosition);
+        if (visible && (launcherPosition || dockSide)) applyLauncherPosition(launcherPosition);
         persist(true);
     };
     const dismiss = () => {
@@ -156,6 +196,13 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     const on = (target, event, callback) => target?.addEventListener(event, callback, options);
     on(opener, 'click', () => show());
     on(visibilityToggle, 'change', () => setVisible(visibilityToggle.checked));
+    on(compactToggle, 'change', () => {
+        autoCompact = compactToggle.checked;
+        if (!autoCompact) dockSide = null;
+        syncVisibility();
+        if (launcherPosition) applyLauncherPosition(launcherPosition);
+        persist(true);
+    });
     on(dock, 'click', () => close({ focusDock: true }));
     on(header.querySelector('.als-floating-minimize'), 'click', () => close());
     on(header.querySelector('.als-floating-close'), 'click', dismiss);
@@ -165,7 +212,7 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
             close();
         }
     });
-    const bindMovement = (target, enabled, getPosition, move, reset) => {
+    const bindMovement = (target, enabled, getPosition, move, reset, finish = () => {}, touchTap = null) => {
         let suppressClick = false;
         on(target, 'pointerdown', event => {
             if (!enabled() || drag || event.button !== 0 || event.isPrimary === false) return;
@@ -186,6 +233,15 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
         const endDrag = event => {
             if (drag?.target !== target || drag.pointerId !== event.pointerId) return;
             stopDrag();
+            if (suppressClick && event.type === 'pointerup') finish();
+            else if (target === launcher && dockSide) applyLauncherPosition(launcherPosition);
+            // Browsers can suppress the first synthetic click after a touch drag.
+            // Activate a stationary touch directly, then consume its optional click.
+            if (event.type === 'pointerup' && event.pointerType === 'touch' && !suppressClick && touchTap) {
+                suppressClick = true;
+                event.preventDefault();
+                touchTap();
+            }
             persist(true);
         };
         on(target, 'pointerup', endDrag);
@@ -208,27 +264,30 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
                 const step = event.shiftKey ? 40 : 8;
                 move({ x: position.x + (event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0),
                     y: position.y + (event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0) });
+                finish(event.key);
             }
             persist(true);
         });
     };
     bindMovement(handle, () => open, () => root.getBoundingClientRect(), position => applyFrame({ ...frame, ...position }), () => applyFrame({ ...frame, x: undefined, y: undefined }));
-    bindMovement(launcher, () => !open && visible, () => shell.getBoundingClientRect(), applyLauncherPosition, () => {
+    bindMovement(launcher, () => !open && visible, () => shell.getBoundingClientRect(), position => applyLauncherPosition(position, true), () => {
+        dockSide = null;
         launcherPosition = null;
+        syncVisibility();
         for (const property of ['left', 'top', 'right', 'bottom']) shell.style.removeProperty(property);
-    });
+    }, finishLauncherMovement, () => show());
     on(launcher, 'click', () => show());
     const resize = () => {
         stopDrag();
         syncVisibility();
         if (open) applyFrame(frame);
-        else if (launcherPosition) applyLauncherPosition(launcherPosition);
+        else if (launcherPosition || dockSide) applyLauncherPosition(launcherPosition);
         persist();
     };
     on(window, 'resize', resize);
     on(window.visualViewport, 'resize', resize);
     const observer = new ResizeObserver(entries => {
-        if (!open && launcherPosition && entries.some(entry => entry.target === shell)) applyLauncherPosition(launcherPosition);
+        if (!open && !drag && (launcherPosition || dockSide) && entries.some(entry => entry.target === shell)) applyLauncherPosition(launcherPosition);
         if (!open || drag) return;
         const rect = root.getBoundingClientRect();
         if (Math.abs(rect.width - frame.width) < 1 && Math.abs(rect.height - frame.height) < 1) return;
@@ -240,11 +299,11 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     const dockObserver = new IntersectionObserver(entries => {
         dockInView = entries.some(entry => entry.isIntersecting && entry.intersectionRect.height > 0);
         syncVisibility();
-        if (launcherPosition) applyLauncherPosition(launcherPosition);
+        if (launcherPosition || dockSide) applyLauncherPosition(launcherPosition);
     });
     dockObserver.observe(root.querySelector('.inline-drawer-content'));
     syncVisibility();
-    if (launcherPosition) applyLauncherPosition(launcherPosition);
+    if (launcherPosition || dockSide) applyLauncherPosition(launcherPosition);
     const controller = {
         open: show, close, setVisible,
         update({ busy = false, enabled = true, autoEnabled = true, tokens } = {}) {
@@ -262,10 +321,10 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
             updateMode(shell.querySelector('.als-launcher-mode'), !enabled ? '停用' : autoEnabled ? '自动' : '手动', !enabled ? 'off' : autoEnabled ? 'on' : 'manual', `${pluginState}；${autoState}`);
             launcher.classList.toggle('als-launcher-busy', busy);
             launcher.classList.toggle('als-launcher-paused', !enabled);
-            launcher.setAttribute('aria-label', `打开总结悬浮窗口，${pluginState}，${autoState}`);
-            launcher.title = (busy ? '总结任务处理中' : '打开总结与记忆面板') + ` · ${pluginState} · ${autoState} · 拖动移动，点击打开；方向键微调，Home 键复位`;
-            launcher.querySelector('.als-launcher-count').textContent = Number.isFinite(tokens)
-                ? (tokens >= 1000 ? (tokens / 1000).toFixed(tokens >= 10000 ? 0 : 1) + 'k' : String(tokens)) : '';
+            const countDescription = Number.isFinite(tokens) ? `最近一次计数 ${tokens.toLocaleString()} token` : '尚无 token 计数';
+            launcher.setAttribute('aria-label', `打开总结悬浮窗口，${countDescription}，${busy ? '任务处理中，' : ''}${pluginState}，${autoState}`);
+            launcher.title = (busy ? '总结任务处理中' : '打开总结与记忆面板') + ` · ${countDescription} · ${pluginState} · ${autoState} · 拖动靠边可精简，拖离恢复；点击打开，方向键微调，Home 键复位`;
+            launcher.querySelector('.als-launcher-count').textContent = launcherTokenText(tokens);
         },
         destroy() {
             stopDrag();

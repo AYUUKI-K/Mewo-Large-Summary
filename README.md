@@ -1,8 +1,17 @@
 # 喵喵大总结
 
-版本：1.2.13 | by NUE-喵喵电波
+版本：1.2.14 | by NUE-喵喵电波
 
 喵！这是 mewo 系列的 SillyTavern 大总结扩展。默认使用酒馆主 API，也可以选自己配置的 OpenAI 兼容副 API；每个角色卡的聊天档一个世界书条目，总结保存确认后，只隐藏一次旧楼层。
+
+## 1.2.14 靠边精简与 token 常驻
+
+- 将收起的猫咪入口拖到左右边缘附近并松手，自动吸附为 token 小标签；点击打开完整面板，收起后回到停靠位置，拖离边缘松手恢复猫咪入口。展开的操作面板保持原有拖动方式。
+- “设置 → 界面 → 靠边自动精简”默认开启，立即生效并记住当前浏览器的选择；旧位置不会在升级后自行吸附，只有主动拖动靠边才触发。关闭开关会恢复普通入口。
+- 停靠方向和相对高度在刷新、屏幕旋转与视口缩小时保留。精简标签至少 64×44px，任务处理中保留状态提示；方向键可移动，朝屏幕内侧移动可脱离吸附，Home 复位。
+- token 沿用最近一次计数，不额外发起请求。缩写保留一位小数，例如 `12,345 → 12.3k`；悬停提示和无障碍名称包含完整计数，尚无计数显示 `—`，已知零值显示 `0`。完整面板仍可查看及刷新计数。
+- 保留手机设置面板可见时的临时入口避让，以及“关闭悬浮窗”后的显示偏好。
+- 触屏拖动后立即轻点也能打开，取消手势不会误打开窗口。浏览器模拟与真实宿主的验证范围见 [兼容性说明](COMPATIBILITY.md)。
 
 ## 1.2.13 TauriTavern 后处理预览兼容
 
@@ -234,6 +243,13 @@
 node --experimental-vm-modules --test tests/regression.mjs tests/regressions.cjs tests/ui-model.mjs tests/summary-stream.mjs tests/host-compatibility.mjs tests/source-coverage.mjs tests/tauri-prompt-preview.mjs
 node --check index.js
 node tests/ui-smoke.mjs 8786
+```
+
+使用已有 Playwright CLI 打开上述本地模拟页后，可执行触屏入口回归（会创建并关闭独立的移动端浏览器 context）：
+
+```powershell
+playwright-cli open http://127.0.0.1:8786 --browser chrome
+playwright-cli run-code --filename tests/floating-panel-touch-browser.js
 ```
 
 模拟页可使用 `?host=1.14` 测试旧世界书接口，或 `?host=tauri` 测试宿主标记与缺少新版 AbortSignal 静态方法的场景。它们不是真实酒馆客户端。固定源码核对可单独运行：

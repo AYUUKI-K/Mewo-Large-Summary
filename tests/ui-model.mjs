@@ -1,7 +1,7 @@
 // No browser or host needed: persisted window geometry and reader fallbacks.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { clampPanelFrame, clampLauncherPosition } from '../modules/floating-panel.js';
+import { clampPanelFrame, clampLauncherPosition, launcherDockSide, dockedLauncherPosition, launcherTokenText } from '../modules/floating-panel.js';
 import { renderSummaryReader } from '../modules/summary-reader.js';
 import { buildSummaryMessages, buildSummaryTextPrompt, SUMMARY_TASK_INSTRUCTION } from '../modules/summary-prompt.js';
 import { summaryResultText, automaticStatus, tokenComparisonText } from '../modules/summary-model.js';
@@ -119,6 +119,35 @@ test('the cat launcher stays reachable after dragging to an edge or resizing the
     assert.deepEqual(clampLauncherPosition(moved, size, viewport), moved);
     assert.deepEqual(clampLauncherPosition(moved, size, { width: 320, height: 220 }), { x: 180, y: 138 });
     assert.deepEqual(clampLauncherPosition(null, size, viewport), clampLauncherPosition({}, size, viewport));
+});
+
+test('launcher snaps only within 24px of either reachable edge', () => {
+    const size = { width: 160, height: 70 };
+    const viewport = { width: 390, height: 844 };
+    assert.equal(launcherDockSide({ x: 36 }, size, viewport), 'left');
+    assert.equal(launcherDockSide({ x: 37 }, size, viewport), null);
+    assert.equal(launcherDockSide({ x: 194 }, size, viewport), 'right');
+    assert.equal(launcherDockSide({ x: 193 }, size, viewport), null);
+});
+
+test('docked labels retain side and relative height across viewport and count-width changes', () => {
+    const size = { width: 64, height: 44 };
+    assert.deepEqual(dockedLauncherPosition('right', .5, size, { width: 390, height: 844 }), { x: 314, y: 400 });
+    assert.deepEqual(dockedLauncherPosition('left', .5, size, { width: 844, height: 390 }), { x: 12, y: 173 });
+    assert.deepEqual(dockedLauncherPosition('right', .5, { width: 100, height: 44 }, { width: 320, height: 220 }), { x: 208, y: 88 });
+    assert.equal(dockedLauncherPosition('left', 10, size, { width: 320, height: 220 }).y, 164);
+    assert.equal(dockedLauncherPosition('left', -1, size, { width: 320, height: 220 }).y, 12);
+    assert.equal(dockedLauncherPosition('left', NaN, size, { width: 320, height: 220 }).y, 88);
+});
+
+test('compact token counts distinguish unknown from zero and retain useful precision', () => {
+    assert.equal(launcherTokenText(undefined), '—');
+    assert.equal(launcherTokenText(NaN), '—');
+    assert.equal(launcherTokenText(0), '0');
+    assert.equal(launcherTokenText(999), '999');
+    assert.equal(launcherTokenText(12345), '12.3k');
+    assert.equal(launcherTokenText(60000), '60k');
+    assert.equal(launcherTokenText(1234567), '1234.6k');
 });
 
 test('invalid saved geometry falls back to a usable frame', () => {
