@@ -18,7 +18,8 @@ import { createIncompleteDraftStore } from './modules/incomplete-drafts.js';
 
 const MODULE_NAME = 'auto_large_summary';
 const ENTRY_MARKER = 'auto_large_summary';
-const EXTENSION_VERSION = '1.2.14';
+const EXTENSION_VERSION = '1.2.15';
+const SECONDARY_MAX_TOKENS = 8192;
 const SUMMARY_INJECTION_ID = 'meow_large_summary_instruction';
 
 let settings;
@@ -719,14 +720,12 @@ function buildSecondaryRequest(context, original, config) {
         messages: structuredClone(messages), stream: false, n: 1,
         custom_url: config.url, custom_include_headers: secondaryHeaders(config),
         custom_prompt_post_processing: original.custom_prompt_post_processing ?? 'none',
-        max_tokens: Math.max(1, Math.floor(Number(original.max_tokens ?? original.max_completion_tokens ?? original.max_length
-            ?? context.chatCompletionSettings?.openai_max_tokens) || 8192)),
+        // Only the assembled prompt and host-side message formatting are shared.
+        // Omit optional sampling fields so the secondary provider uses its own
+        // defaults, including models that reject temperature or penalty fields.
+        max_tokens: SECONDARY_MAX_TOKENS,
         user_name: original.user_name ?? context.name1, char_name: original.char_name ?? context.name2,
     };
-    for (const field of ['temperature', 'top_p', 'frequency_penalty', 'presence_penalty', 'seed']) {
-        if (Number.isFinite(original[field])) payload[field] = original[field];
-    }
-    if (Array.isArray(original.stop)) payload.stop = original.stop.filter(value => typeof value === 'string');
     return payload;
 }
 

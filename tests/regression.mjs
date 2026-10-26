@@ -1335,10 +1335,12 @@ test('secondary URL normalization accepts base and completion URLs without dupli
     assert.throws(() => f.api.getSecondaryConfig({ secondaryUrl: 'https://example.test/v1', secondaryKey: 'bad\nkey', secondaryModel: 'a' }), /不能换行/);
 });
 
-test('secondary payload keeps processed messages and standard sampling but excludes main credentials and tools', async () => {
+test('secondary payload keeps processed messages with independent defaults and excludes main credentials and tools', async () => {
     const f = await fixture();
     const original = { messages: [{ role: 'system', content: '经过 EJS 处理的环境' }, { role: 'user', content: '尾部指令' }],
-        max_tokens: 4096, temperature: 0.7, top_p: 0.9, stream: true, model: 'main-model',
+        max_tokens: 4096, max_completion_tokens: 65536, max_length: 2048,
+        temperature: 0.7, top_p: 0.9, frequency_penalty: 1.8, presence_penalty: 1.5, seed: 42,
+        top_k: 40, min_p: 0.1, reasoning_effort: 'high', stream: true, model: 'main-model',
         reverse_proxy: 'https://main.test', proxy_password: 'main-key', custom_include_headers: 'main-secret',
         tools: [{ type: 'function' }], tool_choice: 'auto', secret_id: 'main-secret-id', custom_include_body: 'model: wrong',
         custom_prompt_post_processing: 'strict', stop: ['stop'] };
@@ -1347,8 +1349,11 @@ test('secondary payload keeps processed messages and standard sampling but exclu
     assert.equal(payload.chat_completion_source, 'custom');
     assert.equal(payload.model, 'selected-model');
     assert.equal(payload.stream, false);
-    assert.equal(payload.max_tokens, 4096);
-    assert.equal(payload.temperature, 0.7);
+    assert.equal(payload.max_tokens, 8192);
+    for (const field of ['temperature', 'top_p', 'frequency_penalty', 'presence_penalty', 'seed',
+        'stop', 'max_completion_tokens', 'max_length', 'top_k', 'min_p', 'reasoning_effort']) {
+        assert.equal(Object.hasOwn(payload, field), false, `${field} cannot inherit the main API setting`);
+    }
     assert.equal(payload.custom_prompt_post_processing, 'strict');
     assert.equal(JSON.parse(payload.custom_include_headers).Authorization, 'Bearer secondary-key');
     assert.equal(JSON.stringify(payload).includes('main-secret'), false);

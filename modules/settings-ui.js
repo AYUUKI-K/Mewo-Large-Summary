@@ -84,7 +84,7 @@ export function settingsMarkup(version) {
             <section class="als-form-section"><h4>API 与模型</h4><label class="als-field">总结使用的 API<select class="text_pole als-api-mode"><option value="main">主 API · 跟随当前酒馆连接</option><option value="secondary">副 API · OpenAI 兼容接口</option></select></label>
               <label class="als-switch als-switch-row"><span><strong>流式接收总结</strong><small>显示实时进度与正文。仅影响总结；接口不支持时可关闭。</small></span><input class="als-stream-summary" type="checkbox" aria-label="流式接收总结"><span class="als-switch-track" aria-hidden="true"></span></label>
               <p class="als-help">支持聊天补全主 API 和副 API；其他主 API 沿用完整响应。模型长时间无响应或中转缓冲时，流式仍可能超时。</p>
-              <div class="als-secondary-settings" hidden><p class="als-help">只用于总结，不改变聊天连接。生成参数沿用当前预设。</p>
+              <div class="als-secondary-settings" hidden><p class="als-help">只用于总结，不改变聊天连接。采样使用副接口默认值，输出上限 8192 token，不继承主 API 的采样参数、停止词和随机种子喵。</p>
                 <label class="als-field">副 API 基础 URL<input class="text_pole als-secondary-url" type="url" placeholder="https://api.example.com/v1" autocomplete="off" spellcheck="false"></label>
                 <label class="als-field">副 API Key<input class="text_pole als-secondary-key" type="password" placeholder="无密钥服务可留空" autocomplete="new-password" spellcheck="false"></label>
                 <div class="als-model-state"><small class="als-model-status als-muted" role="status">填写连接信息后自动拉取模型。</small><button type="button" class="menu_button als-model-fetch">拉取模型</button></div>
