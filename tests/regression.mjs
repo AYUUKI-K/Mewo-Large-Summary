@@ -1349,7 +1349,7 @@ test('secondary payload keeps processed messages with independent defaults and e
     assert.equal(payload.chat_completion_source, 'custom');
     assert.equal(payload.model, 'selected-model');
     assert.equal(payload.stream, false);
-    assert.equal(payload.max_tokens, 8192);
+    assert.equal(payload.max_tokens, 65536);
     for (const field of ['temperature', 'top_p', 'frequency_penalty', 'presence_penalty', 'seed',
         'stop', 'max_completion_tokens', 'max_length', 'top_k', 'min_p', 'reasoning_effort']) {
         assert.equal(Object.hasOwn(payload, field), false, `${field} cannot inherit the main API setting`);
