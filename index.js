@@ -18,7 +18,7 @@ import { createIncompleteDraftStore } from './modules/incomplete-drafts.js';
 
 const MODULE_NAME = 'auto_large_summary';
 const ENTRY_MARKER = 'auto_large_summary';
-const EXTENSION_VERSION = '1.2.16';
+const EXTENSION_VERSION = '1.2.17';
 const SECONDARY_MAX_TOKENS = 65536;
 const SUMMARY_INJECTION_ID = 'meow_large_summary_instruction';
 
@@ -76,6 +76,8 @@ let summaryReturnFocus = null;
 let budgetWarning = '';
 let budgetCheckRevision = 0;
 let currentInputBudget = null;
+let integrationReady = false;
+let lastPublicState = '';
 const incompleteResults = new Map();
 const incompleteDraftStore = createIncompleteDraftStore();
 const loadedIncompleteDrafts = new Set();
@@ -88,7 +90,56 @@ function setStatus(message) {
     const notice = ui?.querySelector('.als-notice');
     if (notice) notice.hidden = /^(自动总结已暂停，可手动总结|总结条目已同步|请选择角色卡的聊天存档)/.test(message);
     if (status) status.textContent = meowText(message);
+    publishIntegrationState();
 }
+
+// Optional integration surface. No settings, chat text or credentials leave it.
+function integrationState() {
+    const archive = getContext()?.chatMetadata?.[MODULE_NAME];
+    const busy = Boolean(runInProgress || thresholdCheckInProgress || sendLockDepth || archiveEditInProgress || disabledCleanupPending || updateInProgress);
+    const paused = Boolean(archive?.summaryStillOverThreshold || archive?.coverageBlocked || archive?.sourceChanged || archive?.branch?.needsRebuild);
+    return Object.freeze({
+        ready: integrationReady, enabled: Boolean(settings?.enabled), autoEnabled: Boolean(settings?.autoEnabled),
+        busy, paused, stage: activeRun?.stage ?? null,
+        tokens: Number.isFinite(archive?.lastPromptTokens) ? archive.lastPromptTokens : null,
+        sourceVersion: EXTENSION_VERSION,
+        message: !integrationReady ? '喵喵大总结正在准备' : busy ? taskLabel(activeRun) || '喵喵大总结正在处理'
+            : !settings?.enabled ? '大总结已关闭' : paused ? '自动总结已暂停，请查看大总结面板'
+                : settings.autoEnabled ? '自动总结已开启' : '手动总结已就绪 · 自动触发关闭',
+    });
+}
+
+function publishIntegrationState() {
+    const state = integrationState();
+    const serialized = JSON.stringify(state);
+    if (serialized === lastPublicState) return;
+    lastPublicState = serialized;
+    window.dispatchEvent(new CustomEvent('mewo-large-summary-state', { detail: state }));
+}
+
+export const integration = Object.freeze({
+    getState: integrationState,
+    async setEnabled(value) {
+        if (typeof value !== 'boolean') throw new TypeError('enabled 必须是布尔值。');
+        if (!integrationReady || (value && integrationState().busy)) return false;
+        return await applyEnabledState(value);
+    },
+    async runManual({ operation = 'summary', mode = null } = {}) {
+        if (!['summary', 'compact'].includes(operation)) throw new TypeError('operation 必须是 summary 或 compact。');
+        if (mode !== null && (!Object.hasOwn(MODE_LABELS, mode) || operation !== 'summary')) throw new TypeError('mode 仅支持普通总结的 incremental 或 merged。');
+        if (!integrationReady || !settings?.enabled || integrationState().busy) return false;
+        return await runLargeSummary({ manual: true, operation, modeOverride: mode }) === true;
+    },
+    mount(container) {
+        if (!integrationReady) return false;
+        return floatingPanel.mount(container);
+    },
+    unmount(container) {
+        return floatingPanel?.unmount(container) ?? false;
+    },
+});
+
+window.MewoLargeSummary = integration;
 
 function meowText(message) {
     const text = String(message ?? '');
@@ -166,10 +217,13 @@ function lockSending() {
         if ('disabled' in control) control.disabled = true;
         control.setAttribute('aria-disabled', 'true');
     }
+    publishIntegrationState();
 }
 
 function unlockSending() {
-    if (sendLockDepth === 0 || --sendLockDepth !== 0) return;
+    if (sendLockDepth === 0) return;
+    sendLockDepth -= 1;
+    if (sendLockDepth !== 0) return;
     document.body?.classList.remove('als-send-locked');
     for (const [control, saved] of lockedControls) {
         if ('disabled' in control) control.disabled = saved.disabled;
@@ -184,6 +238,7 @@ function unlockSending() {
     const modelButton = ui?.querySelector('.als-model-fetch');
     if (modelButton) modelButton.disabled = Boolean(modelFetchController);
     syncOperationalControls();
+    publishIntegrationState();
 }
 
 function blockSendInput(event) {
@@ -362,7 +417,10 @@ function applyEnabledState(value) {
     syncSettingsState();
     // Serialize immediate saves so rapid on/off toggles cannot leave an older
     // setting as the last server write. No other settings drafts are applied.
-    void persistSettingsNow().catch(error => notify('error', `启用状态保存失败：${error.message}`));
+    return persistSettingsNow().then(() => true, error => {
+        notify('error', `启用状态保存失败：${error.message}`);
+        return false;
+    });
 }
 
 function scheduleDisabledCleanup({ bookName = settings.worldBookName } = {}) {
@@ -411,7 +469,7 @@ function scheduleDisabledCleanup({ bookName = settings.worldBookName } = {}) {
             archiveEditInProgress = false;
             unlockSending();
         }
-    }).finally(() => { disabledCleanupPending -= 1; });
+    }).finally(() => { disabledCleanupPending -= 1; publishIntegrationState(); });
     chatSyncChain = operation.then(() => {
         if (stillDisabled()) setStatus('插件已关闭，总结条目已停用，不再注入聊天喵。');
     }).catch(error => {
@@ -1727,8 +1785,9 @@ async function waitForCurrentGeneration(context, expectedChatId) {
     return false;
 }
 
-async function runLargeSummary({ manual = false, operation = 'summary' } = {}) {
+async function runLargeSummary({ manual = false, operation = 'summary', modeOverride = null } = {}) {
     if (!['summary', 'compact', 'rebuild'].includes(operation)) return false;
+    if (modeOverride !== null && (!Object.hasOwn(MODE_LABELS, modeOverride) || operation !== 'summary')) return false;
     if (operation !== 'summary') manual = true;
     if (!settings?.enabled) return false;
     if (!manual && settings.autoEnabled === false) return false;
@@ -1836,9 +1895,9 @@ async function runLargeSummary({ manual = false, operation = 'summary' } = {}) {
         const sourceSnapshot = captureMessageRange(context.chat, context.chat.length - 1);
         const sourceEnd = context.chat.length - 1;
         const sourceDigest = historyDigest(context.chat, sourceEnd);
-        const mode = operation === 'summary' ? settings.mode : 'merged';
+        const mode = operation === 'summary' ? modeOverride ?? settings.mode : 'merged';
         const promptStyle = settings.promptStyle;
-        const template = operation === 'summary' ? settings.prompt : promptTemplates(settings).merged;
+        const template = operation === 'summary' && modeOverride === null ? settings.prompt : promptTemplates(settings)[mode];
         let prompt = context.substituteParamsExtended
             ? await context.substituteParamsExtended(template)
             : template;
@@ -2842,6 +2901,7 @@ async function refreshBudgetWarning() {
 }
 
 function syncActionState() {
+    publishIntegrationState();
     if (!ui || !settings) return;
     const context = getContext();
     const archive = context?.chatMetadata?.[MODULE_NAME];
@@ -3393,6 +3453,7 @@ async function renderSettings() {
     ui.querySelector('.als-delete-round').addEventListener('click', () => void deleteSummarySelection({ roundOnly: true }).catch(error => notify('error', error.message)));
     ui.querySelector('.als-preview-box .als-delete-archive').addEventListener('click', () => void deleteSummarySelection().catch(error => notify('error', error.message)));
     floatingPanel = mountFloatingPanel(ui, { onOpen: () => { showTab('overview'); syncActionState(); } });
+    integrationReady = true;
     syncActionState();
     void updateWorldBookStatus();
     if (settings.enabled) void checkForUpdate({ silent: true });

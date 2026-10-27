@@ -308,3 +308,8 @@ body.als-send-locked :is(#send_but, #option_continue, #option_regenerate, .swipe
 @media (prefers-reduced-motion: reduce) {
     .als-settings :where(*, *::before, *::after) { animation: none !important; transition: none !important; }
 }
+/* Active only while a consumer explicitly mounts the existing panel. */
+.als-settings.als-embedded { min-width: 0; width: 100%; max-width: 100%; }
+.als-settings.als-embedded > .inline-drawer > .inline-drawer-header,
+.als-settings.als-embedded .als-open-floating { display: none; }
+.als-settings.als-embedded > .inline-drawer > .inline-drawer-content { display: block !important; }

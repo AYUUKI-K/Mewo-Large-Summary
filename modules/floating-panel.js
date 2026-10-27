@@ -57,6 +57,8 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     let dockSide = autoCompact && ['left', 'right'].includes(saved.dockSide) ? saved.dockSide : null;
     let dockY = finite(saved.dockY, .5);
     let dockInView = false;
+    let externalContainer = null;
+    let externalWasOpen = false;
     let saveTimer;
     const lifecycle = new AbortController();
     const options = { signal: lifecycle.signal };
@@ -96,7 +98,7 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     const syncVisibility = () => {
         // Temporary phone avoidance is separate from the user's display and
         // position preferences. The launcher returns when the panel leaves view.
-        shell.hidden = open || !visible || (viewport().width <= 600 && dockInView);
+        shell.hidden = Boolean(externalContainer) || open || !visible || (viewport().width <= 600 && dockInView);
         if (visibilityToggle) visibilityToggle.checked = visible;
         if (compactToggle) compactToggle.checked = autoCompact;
         shell.dataset.dock = dockSide ?? '';
@@ -112,7 +114,7 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     const persist = (immediate = false) => {
         clearTimeout(saveTimer);
         const write = () => {
-            try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ open, visible, frame, launcherPosition, autoCompact, dockSide, dockY })); } catch { /* Private mode can reject writes. */ }
+            try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ open: externalContainer ? externalWasOpen : open, visible, frame, launcherPosition, autoCompact, dockSide, dockY })); } catch { /* Private mode can reject writes. */ }
         };
         if (immediate) write();
         else saveTimer = setTimeout(write, 120);
@@ -145,7 +147,7 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
         drag = null;
         if (current?.target.hasPointerCapture(current.pointerId)) current.target.releasePointerCapture(current.pointerId);
     };
-    const close = ({ focusDock = false } = {}) => {
+    const close = ({ focusDock = false, focus = true, save = true } = {}) => {
         if (!open) return;
         open = false;
         stopDrag();
@@ -160,9 +162,11 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
         syncVisibility();
         if (launcherPosition || dockSide) applyLauncherPosition(launcherPosition);
         launcher.setAttribute('aria-expanded', 'false');
-        persist(true);
-        if (focusDock || shell.hidden) focusHome();
-        else launcher.focus();
+        if (save) persist(true);
+        if (focus) {
+            if (focusDock || shell.hidden) focusHome();
+            else launcher.focus();
+        }
     };
     const setVisible = value => {
         visible = Boolean(value);
@@ -176,6 +180,7 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
         focusHome();
     };
     const show = ({ focus = true } = {}) => {
+        if (externalContainer) return;
         if (open) { if (focus) handle.focus(); return; }
         visible = true;
         open = true;
@@ -304,8 +309,40 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
     dockObserver.observe(root.querySelector('.inline-drawer-content'));
     syncVisibility();
     if (launcherPosition || dockSide) applyLauncherPosition(launcherPosition);
+    // Observe only while embedded. A removed host returns the original panel,
+    // including its event listeners, unsaved drafts and in-flight task controls.
+    const embeddingObserver = new MutationObserver(() => {
+        if (externalContainer && (!externalContainer.isConnected || root.parentElement !== externalContainer)) {
+            controller.unmount(externalContainer);
+        }
+    });
     const controller = {
         open: show, close, setVisible,
+        mount(container) {
+            if (!(container instanceof HTMLElement) || container.ownerDocument !== root.ownerDocument || !container.isConnected
+                || container === root || root.contains(container)) throw new TypeError('请提供当前页面内已挂载的 HTML 容器。');
+            if (externalContainer && externalContainer !== container) return false;
+            if (externalContainer === container) return true;
+            externalWasOpen = open;
+            close({ focus: false, save: false });
+            stopDrag();
+            externalContainer = container;
+            root.classList.add('als-embedded');
+            container.append(root);
+            syncVisibility();
+            embeddingObserver.observe(document.body, { childList: true, subtree: true });
+            return true;
+        },
+        unmount(container) {
+            if (!externalContainer || externalContainer !== container) return false;
+            embeddingObserver.disconnect();
+            externalContainer = null;
+            root.classList.remove('als-embedded');
+            home.after(root);
+            syncVisibility();
+            if (launcherPosition || dockSide) applyLauncherPosition(launcherPosition);
+            return true;
+        },
         update({ busy = false, enabled = true, autoEnabled = true, tokens } = {}) {
             const pluginState = enabled ? '插件已开启' : '插件已关闭';
             const autoState = !autoEnabled ? (enabled ? '自动总结已关闭，可手动总结' : '自动总结已关闭，启用插件后可手动总结')
@@ -327,6 +364,8 @@ export function mountFloatingPanel(root, { onOpen = () => {} } = {}) {
             launcher.querySelector('.als-launcher-count').textContent = launcherTokenText(tokens);
         },
         destroy() {
+            controller.unmount(externalContainer);
+            embeddingObserver.disconnect();
             stopDrag();
             close({ focusDock: true });
             lifecycle.abort();

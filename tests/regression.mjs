@@ -363,6 +363,7 @@ test('input budget warning follows connection capacity without modifying thresho
 });
 
 async function fixture(savedSettings = {}, storageData = new Map()) {
+    const integrationEvents = [];
     const notices = [];
     const writes = [];
     const executed = [];
@@ -427,10 +428,12 @@ async function fixture(savedSettings = {}, storageData = new Map()) {
     const worldInfo = { world_names: [] };
     const sandbox = createContext({
         console: { ...console, error() {}, warn() {} }, structuredClone, setTimeout, clearTimeout, setInterval, clearInterval, URL, Response, AbortController, AbortSignal, TextDecoder,
+        CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } },
         location: { origin: 'http://st.local' },
         localStorage: { getItem: key => storageData.get(key) ?? null, setItem: (key, value) => storageData.set(key, value), removeItem: key => storageData.delete(key) },
         crypto: { randomUUID: () => 'archive-a' },
         window: {
+            dispatchEvent: event => { integrationEvents.push(event); return true; },
             confirm: () => true,
             SillyTavern: { getContext: () => context },
             toastr: Object.fromEntries(['info', 'success', 'warning', 'error', 'clear'].map(kind => [kind, (...args) => {
@@ -502,7 +505,7 @@ async function fixture(savedSettings = {}, storageData = new Map()) {
         });
     };
     return {
-        api, sandbox, event, input, send, guarded, body, notices, writes, executed, savedPreferences, tokenRenders, controls, handlers,
+        api, sandbox, event, input, send, guarded, body, notices, writes, executed, savedPreferences, tokenRenders, controls, handlers, integrationEvents,
         context: initialContext, setContext: next => { context = next; },
         interceptor: sandbox[manifest.generate_interceptor],
         prepareSummary({ nativeRequest = false, coverage = false } = {}) {
@@ -528,6 +531,102 @@ function ownedSummaryEntry(uid, archiveId, cardKey = 'a.png') {
         } },
     };
 }
+
+test('optional integration is inert until initialized and exposes only public state', async () => {
+    const f = await fixture({ secondaryKey: 'private-test-key', secondaryUrl: 'https://private.example', prompt: 'private-template' });
+    const api = f.sandbox.window.MewoLargeSummary;
+    assert.equal(api.getState().ready, false);
+    assert.equal(await api.runManual(), false);
+    assert.equal(await api.setEnabled(false), false);
+    assert.equal(f.savedPreferences.length, 0);
+    assert.equal(f.writes.length, 0);
+    assert.equal(f.executed.length, 0);
+    f.api.evaluate('integrationReady = true; syncActionState()');
+    const state = api.getState();
+    assert.equal(state.ready, true);
+    assert.ok(Object.isFrozen(state));
+    assert.ok(Object.isFrozen(api));
+    assert.doesNotMatch(JSON.stringify(state), /private|secondary|prompt/);
+    assert.ok(f.integrationEvents.some(event => event.type === 'mewo-large-summary-state' && event.detail.ready));
+});
+
+test('integration manual summary overrides this run only and preserves unsaved settings drafts', async () => {
+    const f = await fixture({ autoEnabled: false, mode: 'incremental', prompts: { incremental: 'incremental-template', merged: 'merged-template' } });
+    f.prepareSummary();
+    f.api.evaluate(`integrationReady = true; settingsDraft.keepRecent = 7;
+        requestMainApiSummary = async (context, prompt) => { __fixtures.usedPrompt = prompt; return 'summary result'; };`);
+    const before = structuredClone(f.api.state().settings);
+    assert.equal(await f.sandbox.window.MewoLargeSummary.runManual({ mode: 'merged' }), true);
+    assert.equal(f.sandbox.__fixtures.usedPrompt, 'merged-template');
+    assert.deepEqual(structuredClone(f.api.state().settings), before);
+    assert.equal(f.api.evaluate('settingsDraft.keepRecent'), 7);
+    assert.equal(bookEntry(f).extensions.auto_large_summary.records.at(-1).mode, 'merged');
+    assert.deepEqual(f.executed, ['/hide 0-9']);
+    assert.equal(f.sandbox.window.MewoLargeSummary.getState().busy, false);
+});
+
+test('integration refuses reentry and invalid operations before writes or generation', async () => {
+    const f = await fixture({ autoEnabled: false });
+    f.api.evaluate('integrationReady = true; runInProgress = true;');
+    const api = f.sandbox.window.MewoLargeSummary;
+    assert.equal(await api.runManual(), false);
+    assert.equal(await api.setEnabled(true), false);
+    f.api.evaluate('runInProgress = false');
+    await assert.rejects(api.runManual({ mode: 'unknown' }), /mode/);
+    await assert.rejects(api.runManual({ operation: 'compact', mode: 'merged' }), /mode/);
+    await assert.rejects(api.runManual({ operation: 'rebuild' }), /operation/);
+    await assert.rejects(api.setEnabled('false'), /布尔/);
+    assert.equal(f.writes.length, 0);
+    assert.equal(f.executed.length, 0);
+    assert.equal(f.savedPreferences.length, 0);
+});
+
+test('integration shares the native manual engine and does not create a second job', async () => {
+    const f = await fixture({ autoEnabled: false });
+    f.prepareSummary();
+    f.api.evaluate('integrationReady = true;');
+    let finish;
+    f.sandbox.__fixtures.wait = new Promise(resolve => { finish = resolve; });
+    f.api.evaluate('requestMainApiSummary = async () => { __fixtures.requests = (__fixtures.requests ?? 0) + 1; return await __fixtures.wait; };');
+    const first = f.sandbox.window.MewoLargeSummary.runManual();
+    for (let i = 0; i < 20 && !f.api.state().runInProgress; i++) await Promise.resolve();
+    assert.equal(f.sandbox.window.MewoLargeSummary.getState().busy, true);
+    assert.equal(await f.api.runLargeSummary({ manual: true }), false);
+    assert.equal(await f.sandbox.window.MewoLargeSummary.runManual(), false);
+    finish('shared summary');
+    assert.equal(await first, true);
+    assert.deepEqual(f.executed, ['/hide 0-9']);
+    assert.equal(f.sandbox.__fixtures.requests, 1);
+    assert.equal(bookEntry(f).extensions.auto_large_summary.records.length, 1);
+});
+
+test('integration enable switch confirms persistence without applying unrelated drafts', async () => {
+    const f = await fixture({ autoEnabled: false });
+    f.api.evaluate('integrationReady = true; settingsDraft.threshold = 1234;');
+    assert.equal(await f.sandbox.window.MewoLargeSummary.setEnabled(false), true);
+    await f.api.evaluate('chatSyncChain');
+    assert.equal(f.savedPreferences.at(-1).auto_large_summary.enabled, false);
+    assert.notEqual(f.savedPreferences.at(-1).auto_large_summary.threshold, 1234);
+    assert.equal(f.api.evaluate('settingsDraft.threshold'), 1234);
+    f.sandbox.__fixtures.native.saveSettings = async () => { throw new Error('test write failure'); };
+    assert.equal(await f.sandbox.window.MewoLargeSummary.setEnabled(false), false);
+    await f.api.evaluate('chatSyncChain');
+});
+
+test('integration panel methods delegate ownership without touching running tasks', async () => {
+    const f = await fixture();
+    f.api.evaluate(`integrationReady = true; runInProgress = true;
+        floatingPanel = { mount: container => { __fixtures.mounted = container; return true; },
+            unmount: container => { __fixtures.unmounted = container; return true; } };`);
+    const container = {};
+    assert.equal(f.sandbox.window.MewoLargeSummary.mount(container), true);
+    assert.equal(f.sandbox.__fixtures.mounted, container);
+    assert.equal(f.sandbox.window.MewoLargeSummary.unmount(container), true);
+    assert.equal(f.sandbox.__fixtures.unmounted, container);
+    assert.equal(f.api.state().runInProgress, true);
+    assert.equal(f.writes.length, 0);
+    assert.equal(f.savedPreferences.length, 0);
+});
 
 test('manual mode refreshes overview message counts on a reply without starting a task', async () => {
     const f = await fixture({ autoEnabled: false });

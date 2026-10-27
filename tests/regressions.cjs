@@ -74,7 +74,8 @@ function fixture({ books = {}, active = [], characterId = '0', saveFails = false
         },
     };
     const sandbox = vm.createContext({
-        window: { SillyTavern: { getContext: () => context } },
+        window: { SillyTavern: { getContext: () => context }, dispatchEvent() {} },
+        CustomEvent: class { constructor(type, options) { this.type = type; this.detail = options.detail; } },
         structuredClone, URL, AbortController, AbortSignal, location: { pathname: '/' },
         document: {
             querySelectorAll(selector) {
