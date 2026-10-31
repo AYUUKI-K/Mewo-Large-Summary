@@ -1,5 +1,11 @@
 # 更新日志
 
+## 1.2.18 拼写修正与兼容
+
+- 仓库名称由 `Mewo-Large-Summary` 修正为 `Meow-Large-Summary`，安装文档与更新提示统一使用 meow。旧仓库地址保留 GitHub 重定向，原安装目录继续支持检查和更新，无需重新安装。
+- 新集成入口改为 `window.MeowLargeSummary` 和 `meow-large-summary-state`；旧全局接口和事件保留兼容，使用同一总结引擎与面板。
+- 设置键、世界书标记、总结记录和浏览器偏好保持原样。
+
 ## 1.2.17 可选集成接口
 
 - 新增 `window.MewoLargeSummary`，也可从已安装扩展的模块导出 `integration` 获取同一接口；通过 `mewo-large-summary-state` 通知状态变化。

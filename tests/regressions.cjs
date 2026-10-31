@@ -15,7 +15,7 @@ function classicSource(file, seen = new Set()) {
 }
 const source = classicSource(path.join(__dirname, '..', 'index.js'))
     .replace(/^export\s+/gm, '')
-    .replace(/\bimport\.meta\.url/g, JSON.stringify('http://st.local/scripts/extensions/third-party/Mewo-Large-Summary/index.js'));
+    .replace(/\bimport\.meta\.url/g, JSON.stringify('http://st.local/scripts/extensions/third-party/Meow-Large-Summary/index.js'));
 const clone = value => structuredClone(value);
 
 // Model ST's server and client separately: /get supplies a dummy for missing

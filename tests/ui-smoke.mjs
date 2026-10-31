@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-const prefix = '/scripts/extensions/third-party/Mewo-Large-Summary/';
+const prefix = '/scripts/extensions/third-party/Meow-Large-Summary/';
 const host = process.argv[3];
 const books = {};
 let modelCalls = 0;
@@ -125,7 +125,7 @@ const server = http.createServer(async (request, response) => {
             return send(await readFile(path.join(host, 'node_modules', library), 'utf8'), 'text/javascript');
         }
         if (url.pathname === '/fixture/books') return send(Object.keys(books));
-        if (url.pathname === '/api/extensions/discover') return send([{ name: 'third-party/Mewo-Large-Summary', type: 'local' }]);
+        if (url.pathname === '/api/extensions/discover') return send([{ name: 'third-party/Meow-Large-Summary', type: 'local' }]);
         if (url.pathname === '/api/extensions/version') return send({ isUpToDate: true });
         if (url.pathname === '/script.js') return send(`export const is_send_press=false;export const isGenerating=()=>false;export async function saveSettings(){window.smoke.persist();await window.smoke.context.eventSource.emit('SETTINGS_UPDATED')}`, 'text/javascript');
         if (url.pathname === '/scripts/world-info.js') return send(`export let world_names=[];export function setNames(names){world_names=names}`, 'text/javascript');

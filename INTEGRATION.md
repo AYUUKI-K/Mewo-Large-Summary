@@ -5,9 +5,9 @@ panel and invoke its manual action. Installing this change does not enable an
 integration, change defaults, move a panel, migrate data or start another engine.
 The normal extension settings page and floating window remain the default UI.
 
-`window.MewoLargeSummary` is also available as the named ES module export
+`window.MeowLargeSummary` is also available as the named ES module export
 `integration` from `index.js`. Wait until `getState().ready` is true. Listen to
-`mewo-large-summary-state` on the Tavern window for subsequent changes, and read
+`meow-large-summary-state` on the Tavern window for subsequent changes, and read
 the initial state when attaching a listener. Do not import a second copy under a
 cache-busted URL: the installed extension owns initialization.
 
@@ -51,17 +51,20 @@ or remove summary records. A preset must release its mount on navigation/unload
 and remove its own state listener; it must not destroy the extension.
 
 ```js
-const api = window.MewoLargeSummary;
+const api = window.MeowLargeSummary;
 const onState = event => renderStatus(event.detail);
-window.addEventListener('mewo-large-summary-state', onState);
+window.addEventListener('meow-large-summary-state', onState);
 renderStatus(api.getState());
 if (api.getState().ready) api.mount(container);
 
 // On leaving the host panel:
 api.unmount(container);
-window.removeEventListener('mewo-large-summary-state', onState);
+window.removeEventListener('meow-large-summary-state', onState);
 ```
 
 Embedding does not adopt records from a different plugin/preset namespace.
 Integrators must resolve their own previous engine's lifecycle and ownership
-before switching. This interface does not add any legacy alias or data migration.
+before switching. Since 1.2.18, `window.MewoLargeSummary` remains an alias of the same API and
+`mewo-large-summary-state` is still emitted for existing integrations. New code
+should use the corrected names above and subscribe to only one event name.
+No settings or summary records are migrated.

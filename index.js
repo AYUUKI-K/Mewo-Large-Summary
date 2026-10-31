@@ -18,7 +18,7 @@ import { createIncompleteDraftStore } from './modules/incomplete-drafts.js';
 
 const MODULE_NAME = 'auto_large_summary';
 const ENTRY_MARKER = 'auto_large_summary';
-const EXTENSION_VERSION = '1.2.17';
+const EXTENSION_VERSION = '1.2.18';
 const SECONDARY_MAX_TOKENS = 65536;
 const SUMMARY_INJECTION_ID = 'meow_large_summary_instruction';
 
@@ -114,6 +114,8 @@ function publishIntegrationState() {
     const serialized = JSON.stringify(state);
     if (serialized === lastPublicState) return;
     lastPublicState = serialized;
+    window.dispatchEvent(new CustomEvent('meow-large-summary-state', { detail: state }));
+    // Keep integrations using the original misspelling working.
     window.dispatchEvent(new CustomEvent('mewo-large-summary-state', { detail: state }));
 }
 
@@ -139,7 +141,8 @@ export const integration = Object.freeze({
     },
 });
 
-window.MewoLargeSummary = integration;
+window.MeowLargeSummary = integration;
+window.MewoLargeSummary = integration; // Compatibility with integrations before 1.2.18.
 
 function meowText(message) {
     const text = String(message ?? '');

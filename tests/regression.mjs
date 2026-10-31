@@ -362,7 +362,7 @@ test('input budget warning follows connection capacity without modifying thresho
     assert.equal(f.api.evaluate('budgetWarning'), '');
 });
 
-async function fixture(savedSettings = {}, storageData = new Map()) {
+async function fixture(savedSettings = {}, storageData = new Map(), extensionFolder = 'Meow-Large-Summary') {
     const integrationEvents = [];
     const notices = [];
     const writes = [];
@@ -478,7 +478,7 @@ async function fixture(savedSettings = {}, storageData = new Map()) {
         state: () => ({ sendLockDepth, runInProgress, thresholdCheckInProgress, pendingGeneration, settings })
     };`, {
         context: sandbox, identifier: new URL('../index.js', import.meta.url).href,
-        initializeImportMeta(meta) { meta.url = 'http://st.local/scripts/extensions/third-party/Mewo-Large-Summary/index.js'; },
+        initializeImportMeta(meta) { meta.url = `http://st.local/scripts/extensions/third-party/${extensionFolder}/index.js`; },
         importModuleDynamically: importHostModule,
     });
     const localModules = new Map();
@@ -534,7 +534,8 @@ function ownedSummaryEntry(uid, archiveId, cardKey = 'a.png') {
 
 test('optional integration is inert until initialized and exposes only public state', async () => {
     const f = await fixture({ secondaryKey: 'private-test-key', secondaryUrl: 'https://private.example', prompt: 'private-template' });
-    const api = f.sandbox.window.MewoLargeSummary;
+    const api = f.sandbox.window.MeowLargeSummary;
+    assert.equal(api, f.sandbox.window.MewoLargeSummary, 'legacy integration uses the same engine');
     assert.equal(api.getState().ready, false);
     assert.equal(await api.runManual(), false);
     assert.equal(await api.setEnabled(false), false);
@@ -547,7 +548,24 @@ test('optional integration is inert until initialized and exposes only public st
     assert.ok(Object.isFrozen(state));
     assert.ok(Object.isFrozen(api));
     assert.doesNotMatch(JSON.stringify(state), /private|secondary|prompt/);
-    assert.ok(f.integrationEvents.some(event => event.type === 'mewo-large-summary-state' && event.detail.ready));
+    assert.ok(f.integrationEvents.some(event => event.type === 'meow-large-summary-state' && event.detail.ready));
+    const current = f.integrationEvents.filter(event => event.type === 'meow-large-summary-state');
+    const legacy = f.integrationEvents.filter(event => event.type === 'mewo-large-summary-state');
+    assert.equal(current.length, legacy.length);
+    assert.ok(current.every((event, index) => event.detail === legacy[index].detail));
+});
+
+test('update discovery preserves both old and corrected installation folder names', async () => {
+    for (const folder of ['Mewo-Large-Summary', 'Meow-Large-Summary']) {
+        const f = await fixture({}, new Map(), folder);
+        f.sandbox.fetch = async url => {
+            assert.equal(url, '/api/extensions/discover');
+            return new Response(JSON.stringify([{ name: `third-party/${folder}`, type: 'local' }]));
+        };
+        const installation = await f.api.evaluate('getInstalledExtension()');
+        assert.equal(installation.extensionName, folder);
+        assert.equal(installation.global, false);
+    }
 });
 
 test('integration manual summary overrides this run only and preserves unsaved settings drafts', async () => {
@@ -556,19 +574,19 @@ test('integration manual summary overrides this run only and preserves unsaved s
     f.api.evaluate(`integrationReady = true; settingsDraft.keepRecent = 7;
         requestMainApiSummary = async (context, prompt) => { __fixtures.usedPrompt = prompt; return 'summary result'; };`);
     const before = structuredClone(f.api.state().settings);
-    assert.equal(await f.sandbox.window.MewoLargeSummary.runManual({ mode: 'merged' }), true);
+    assert.equal(await f.sandbox.window.MeowLargeSummary.runManual({ mode: 'merged' }), true);
     assert.equal(f.sandbox.__fixtures.usedPrompt, 'merged-template');
     assert.deepEqual(structuredClone(f.api.state().settings), before);
     assert.equal(f.api.evaluate('settingsDraft.keepRecent'), 7);
     assert.equal(bookEntry(f).extensions.auto_large_summary.records.at(-1).mode, 'merged');
     assert.deepEqual(f.executed, ['/hide 0-9']);
-    assert.equal(f.sandbox.window.MewoLargeSummary.getState().busy, false);
+    assert.equal(f.sandbox.window.MeowLargeSummary.getState().busy, false);
 });
 
 test('integration refuses reentry and invalid operations before writes or generation', async () => {
     const f = await fixture({ autoEnabled: false });
     f.api.evaluate('integrationReady = true; runInProgress = true;');
-    const api = f.sandbox.window.MewoLargeSummary;
+    const api = f.sandbox.window.MeowLargeSummary;
     assert.equal(await api.runManual(), false);
     assert.equal(await api.setEnabled(true), false);
     f.api.evaluate('runInProgress = false');
@@ -588,11 +606,11 @@ test('integration shares the native manual engine and does not create a second j
     let finish;
     f.sandbox.__fixtures.wait = new Promise(resolve => { finish = resolve; });
     f.api.evaluate('requestMainApiSummary = async () => { __fixtures.requests = (__fixtures.requests ?? 0) + 1; return await __fixtures.wait; };');
-    const first = f.sandbox.window.MewoLargeSummary.runManual();
+    const first = f.sandbox.window.MeowLargeSummary.runManual();
     for (let i = 0; i < 20 && !f.api.state().runInProgress; i++) await Promise.resolve();
-    assert.equal(f.sandbox.window.MewoLargeSummary.getState().busy, true);
+    assert.equal(f.sandbox.window.MeowLargeSummary.getState().busy, true);
     assert.equal(await f.api.runLargeSummary({ manual: true }), false);
-    assert.equal(await f.sandbox.window.MewoLargeSummary.runManual(), false);
+    assert.equal(await f.sandbox.window.MeowLargeSummary.runManual(), false);
     finish('shared summary');
     assert.equal(await first, true);
     assert.deepEqual(f.executed, ['/hide 0-9']);
@@ -603,13 +621,13 @@ test('integration shares the native manual engine and does not create a second j
 test('integration enable switch confirms persistence without applying unrelated drafts', async () => {
     const f = await fixture({ autoEnabled: false });
     f.api.evaluate('integrationReady = true; settingsDraft.threshold = 1234;');
-    assert.equal(await f.sandbox.window.MewoLargeSummary.setEnabled(false), true);
+    assert.equal(await f.sandbox.window.MeowLargeSummary.setEnabled(false), true);
     await f.api.evaluate('chatSyncChain');
     assert.equal(f.savedPreferences.at(-1).auto_large_summary.enabled, false);
     assert.notEqual(f.savedPreferences.at(-1).auto_large_summary.threshold, 1234);
     assert.equal(f.api.evaluate('settingsDraft.threshold'), 1234);
     f.sandbox.__fixtures.native.saveSettings = async () => { throw new Error('test write failure'); };
-    assert.equal(await f.sandbox.window.MewoLargeSummary.setEnabled(false), false);
+    assert.equal(await f.sandbox.window.MeowLargeSummary.setEnabled(false), false);
     await f.api.evaluate('chatSyncChain');
 });
 
@@ -619,9 +637,9 @@ test('integration panel methods delegate ownership without touching running task
         floatingPanel = { mount: container => { __fixtures.mounted = container; return true; },
             unmount: container => { __fixtures.unmounted = container; return true; } };`);
     const container = {};
-    assert.equal(f.sandbox.window.MewoLargeSummary.mount(container), true);
+    assert.equal(f.sandbox.window.MeowLargeSummary.mount(container), true);
     assert.equal(f.sandbox.__fixtures.mounted, container);
-    assert.equal(f.sandbox.window.MewoLargeSummary.unmount(container), true);
+    assert.equal(f.sandbox.window.MeowLargeSummary.unmount(container), true);
     assert.equal(f.sandbox.__fixtures.unmounted, container);
     assert.equal(f.api.state().runInProgress, true);
     assert.equal(f.writes.length, 0);
@@ -1789,7 +1807,7 @@ test('product notifications use meow voice while user-supplied prompts remain un
     await f.api.runLargeSummary();
     for (const notice of f.notices.filter(notice => notice.kind !== 'clear')) assert.match(notice.args[0], /喵/);
     assert.equal(f.api.state().settings.prompt, '原封不动的用户提示词');
-    assert.match(markupSource, />mewo!!<\/span>/);
+    assert.match(markupSource, />meow!!<\/span>/);
     assert.equal(source.includes('>New!</span>'), false);
 });
 

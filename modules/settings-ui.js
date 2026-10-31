@@ -22,7 +22,7 @@ export function settingsMarkup(version) {
     return `
       <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-          <div class="als-heading"><span class="als-mascot als-brand-mark" aria-hidden="true"></span><b>喵喵大总结</b><span class="als-update-badge" hidden>mewo!!</span></div>
+          <div class="als-heading"><span class="als-mascot als-brand-mark" aria-hidden="true"></span><b>喵喵大总结</b><span class="als-update-badge" hidden>meow!!</span></div>
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content">
